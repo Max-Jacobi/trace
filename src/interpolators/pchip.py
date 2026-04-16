@@ -106,14 +106,18 @@ class PchipInterpolator3D(InterpolatorBase):
         frac_y = (flat_yi - self.y0) / self.dy
         frac_z = (flat_zi - self.z0) / self.dz
 
-        iy = np.floor(frac_y).astype(int)
-        iz = np.floor(frac_z).astype(int)
+        # Guard against NaN inputs (e.g. tracers that left the domain)
+        nan_yz = np.isnan(frac_y) | np.isnan(frac_z)
+        iy = np.where(nan_yz, 0, np.floor(frac_y)).astype(int)
+        iz = np.where(nan_yz, 0, np.floor(frac_z)).astype(int)
 
         iy0 = iy - 1
         iz0 = iz - 1
 
         groups = defaultdict(list)
         for idx in range(n_points):
+            if nan_yz[idx]:
+                continue  # leave output as NaN
             iy0_val = int(iy0[idx])
             iz0_val = int(iz0[idx])
             # Skip points whose 4-point stencil falls outside the grid
