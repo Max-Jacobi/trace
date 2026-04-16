@@ -69,6 +69,10 @@ class GRASurfaceFileHandler(FileHandler):
     def list_files(self, directory: str) -> list[str]:
         path = Path(directory)
         files = [str(path/f.name) for f in path.iterdir() if f'.surface{self.surface_num}' in f.name]
+        if not files:
+            raise FileNotFoundError(
+                f"No surface{self.surface_num} files found in directory: {directory}"
+            )
         self.load_grid(files[0])
         return files
 
@@ -90,6 +94,14 @@ class GRASurfaceFileHandler(FileHandler):
                 print(f.keys())
                 print(f.file)
                 raise
+        if len(th) < 2:
+            raise ValueError(
+                f"Grid theta coordinate has fewer than 2 points ({len(th)}); cannot compute spacing."
+            )
+        if len(ph) < 2:
+            raise ValueError(
+                f"Grid phi coordinate has fewer than 2 points ({len(ph)}); cannot compute spacing."
+            )
         dth = th[1] - th[0]
         dphi = ph[1] - ph[0]
         g_th = np.arange(1, self.n_ghosts+1)*dth
@@ -113,7 +125,7 @@ class GRASurfaceFileHandler(FileHandler):
                          for key in f[f'fields/00/{grp}/'].keys()]
             avail_keys = [key for key in keys if key in file_keys]
             if not avail_keys:
-                return 0.0, file_path, [], 0
+                return 0.0, "", [], 0
             time = float(f['coordinates/00/T'][0])
         return time, file_path, avail_keys, extra_data['mem_size']
 
@@ -130,14 +142,17 @@ class GRASurfaceFileHandler(FileHandler):
             with File(path, 'r') as f:
                 for key in keys:
                     shm = SharedMemory(name=shared_memory[key])
-                    grp = key.split('.')[0]
-                    buf = np.ndarray(
-                        shape=shape,
-                        dtype=np.float64,
-                        buffer=shm.buf
-                    )
-                    for ir in range(shape[0]):
-                        _fill_with_ghosts(buf[ir], f, f'fields/{ir:02d}/{grp}/{key}', ng=nghosts)
+                    try:
+                        grp = key.split('.')[0]
+                        buf = np.ndarray(
+                            shape=shape,
+                            dtype=np.float64,
+                            buffer=shm.buf
+                        )
+                        for ir in range(shape[0]):
+                            _fill_with_ghosts(buf[ir], f, f'fields/{ir:02d}/{grp}/{key}', ng=nghosts)
+                    finally:
+                        shm.close()
 
     def setup_interpolator(
         self,

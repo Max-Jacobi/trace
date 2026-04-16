@@ -1,10 +1,21 @@
 """
 Module for Piecewise Cubic Hermite Interpolating Polynomial (PCHIP) interpolation in uniform 3D grids.
+
+.. deprecated::
+    This module is a legacy stand-alone file and is superseded by
+    ``src.interpolators.pchip.PchipInterpolator3D`` and
+    ``src.interpolators.linear.LinearInterpolator3D``.
+    It will be removed in a future release.  Import from ``src.interpolators`` instead.
 """
 
-import numpy as np
+import warnings
+warnings.warn(
+    "src.pchip_interpolator is deprecated and will be removed in a future release. "
+    "Use src.interpolators.PchipInterpolator3D or src.interpolators.LinearInterpolator3D instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
-import numpy as np
 from scipy.interpolate import PchipInterpolator, RegularGridInterpolator
 from collections.abc import Callable
 

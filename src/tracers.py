@@ -17,14 +17,14 @@ class Tracer:
         position: np.ndarray,
         time: float,
         keys: list[str],
-        props: dict[str, Any] = {},
+        props: dict[str, Any] | None = None,
         ) -> None:
         self.id = id
         self.initial_position = position.copy()
         self.initial_time = time
         self.positions = []
         self.times = []
-        self.props = props
+        self.props = props if props is not None else {}
         self.data = {k: [] for k in keys}
         self.active = False
         self.done = False
@@ -87,11 +87,14 @@ class Tracers:
 
         file_times = self.file_handler.times
 
-        if not np.all(np.isin(times, file_times)):
-            raise ValueError("Some seed times do not coincide with available file times.")
+        unmatched = [t for t in times if not np.any(np.isclose(t, file_times))]
+        if unmatched:
+            raise ValueError(
+                f"Some seed times do not coincide with available file times: {unmatched[:5]}"
+            )
 
         if props is None:
-            props = [{} for _ in range(positions.shape[1])]
+            props = [{} for _ in range(positions.shape[0])]
 
         self.tracers = [Tracer(id=i, position=pos, time=t, keys=self.file_handler.keys, props=prop)
                         for i, (pos, t, prop) in enumerate(zip(positions, times, props))]
@@ -128,7 +131,7 @@ class Tracers:
             **self.tqdm_kwargs
         ):
             new_tracers = [tr for tr in self.tracers
-                           if len(tr.positions) == 0 and tr.initial_time == time]
+                           if len(tr.positions) == 0 and np.isclose(tr.initial_time, time)]
             if new_tracers:
                 new_pos = np.array([tr.initial_position for tr in new_tracers]).T
                 data = self.interpolate_data(new_pos, data_interpolators[i])
@@ -159,7 +162,7 @@ class Tracers:
                     tracer.active = False
 
             new_data = {k: np.full(len(active_tracers), np.nan) for k in self.file_handler.keys}
-            for k, data in self.interpolate_data(new_x[:, ~nan_mask], data_interpolators[i]).items():
+            for k, data in self.interpolate_data(new_x[:, ~nan_mask], data_interpolators[i+1]).items():
                 new_data[k][~nan_mask] = data
 
             for j, tracer in enumerate(active_tracers):
@@ -167,7 +170,7 @@ class Tracers:
                     continue
                 tracer.add_step(
                     position=new_x[:, j],
-                    time=time,
+                    time=time + dt,
                     data={k: new_data[k][j] for k in self.file_handler.keys},
                 )
         print(f"{sum(tr.done for tr in self.tracers)} tracers done. "

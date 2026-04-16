@@ -15,7 +15,19 @@ class PchipInterpolator3D(InterpolatorBase):
     def __init__(self, *coords: np.ndarray, d: dict[str, np.ndarray], log_coords: list[int] = []):
         self.log_coords = log_coords
 
-        x, y, z = (np.log10(c) if i in log_coords else np.asarray(c) for i, c in enumerate(coords))
+        transformed = []
+        for i, c in enumerate(coords):
+            c = np.asarray(c)
+            if i in log_coords:
+                if np.any(c <= 0):
+                    raise ValueError(
+                        f"Coordinate axis {i} contains non-positive values but log_coords={log_coords}; "
+                        "log10 requires strictly positive inputs."
+                    )
+                transformed.append(np.log10(c))
+            else:
+                transformed.append(c)
+        x, y, z = transformed
 
         d = {k: np.asarray(v) for k, v in d.items()}
 
@@ -62,16 +74,30 @@ class PchipInterpolator3D(InterpolatorBase):
         return interp
 
     def __call__(self, coords: np.ndarray) -> np.ndarray:
-        xi, yi, zi = (np.log10(c) if i in self.log_coords else np.asarray(c)
-                      for i, c in enumerate(coords))
+        transformed = []
+        for i, c in enumerate(coords):
+            c = np.asarray(c)
+            if i in self.log_coords:
+                if np.any(c <= 0):
+                    raise ValueError(
+                        f"Query coordinate axis {i} contains non-positive values but log_coords={self.log_coords}."
+                    )
+                transformed.append(np.log10(c))
+            else:
+                transformed.append(c)
+        xi, yi, zi = transformed
 
-        assert xi.shape == yi.shape == zi.shape
+        if xi.shape != yi.shape or xi.shape != zi.shape:
+            raise ValueError(
+                f"Coordinate arrays must have identical shapes; got {xi.shape}, {yi.shape}, {zi.shape}."
+            )
         flat_xi = xi.ravel()
         flat_yi = yi.ravel()
         flat_zi = zi.ravel()
         n_points = flat_xi.size
 
-        out = [np.empty(n_points, dtype=self.dtype) for _ in self.keys]
+        # Initialise output with NaN so out-of-domain points are returned as NaN
+        out = [np.full(n_points, np.nan, dtype=self.dtype) for _ in self.keys]
 
         if n_points == 0:
             out_arr = np.asarray([o.reshape(xi.shape) for o in out])
@@ -88,7 +114,12 @@ class PchipInterpolator3D(InterpolatorBase):
 
         groups = defaultdict(list)
         for idx in range(n_points):
-            groups[(iy0[idx], iz0[idx])].append(idx)
+            iy0_val = int(iy0[idx])
+            iz0_val = int(iz0[idx])
+            # Skip points whose 4-point stencil falls outside the grid
+            if iy0_val < 0 or iy0_val + 4 > self.ny or iz0_val < 0 or iz0_val + 4 > self.nz:
+                continue
+            groups[(iy0_val, iz0_val)].append(idx)
 
         for (iy0_val, iz0_val), idx_list in groups.items():
             idx_arr = np.array(idx_list, dtype=int)
