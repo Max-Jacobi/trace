@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 
 from src.gra_surface import GRASurfaceFileHandler
 from src.interpolators import PchipInterpolator3D, LinearInterpolator3D
+from src.interpolators.coordinate_transformations import CartesianToSpherical
 from src.integrators import ImplicitTrapezoid, ExplicitTrapezoid
 from src.tracers import Tracers
 
@@ -12,17 +13,25 @@ from src.tracers import Tracers
 
 tracer_path = "/home/ho54hof/repos/trace"
 
-start_t = 6500
-end_t = 3000
-n_r = 3
-n_th = 3
-n_ph = 3
+start_t = 16000
+end_t   = 3500
+rmin    = 300
+rmax    = 1000
+n_r     = 30
+n_th    = 20
+n_ph    = 30
+
+n_cpu = 36
+files_per_step = max(2, 2*n_cpu)
+
 # interpolator = LinearInterpolator3D
 interpolator = PchipInterpolator3D
+
 # integrator = ExplicitTrapezoid()
 integrator = ImplicitTrapezoid(max_iter=5, relax=0.8)
 
 output_dir = f"{tracer_path}/test_"
+output_dir += f"nr{n_r}_nth{n_th}_nph{n_ph}_"
 output_dir += f"{integrator.__class__.__name__[:4]}_".lower()
 output_dir += f"{interpolator.__name__[:3]}".lower()
 os.makedirs(output_dir, exist_ok=True)
@@ -34,7 +43,7 @@ file_handler = GRASurfaceFileHandler(
     interpolator=interpolator,
     #interpolator=PchipInterpolator3D,
     surface_num=2,
-    directory=f"{tracer_path}/data/PL_LR/Lam400_0_LR/combine",
+    directory=f"{tracer_path}/data/PL_LR/Lam300_1_LR/combine",
     log_rad=True,
     keys=[
         'tracer.hydro.aux.T',
@@ -47,8 +56,8 @@ file_handler = GRASurfaceFileHandler(
         'tracer.hydro.aux.V_u_y',
         'tracer.hydro.aux.V_u_z',
     ],
-    n_cpu=12,
-    files_per_step=15,
+    n_cpu=n_cpu,
+    files_per_step=files_per_step,
     verbose=True,
     )
 
@@ -62,8 +71,8 @@ signal.signal(signal.SIGINT, handler)
 ##
 
 n_tracers = n_r * n_th * n_ph
-t_start = np.full(n_tracers, 6000)
-r_start = np.geomspace(400, 800, n_r+1)
+times = np.full(n_tracers, start_t)
+r_start = np.geomspace(rmin, rmax, n_r+1)
 dr = np.diff(r_start)
 r_start = r_start[:-1] + dr/2
 th_start = np.linspace(0, np.pi, n_th+1)
@@ -82,19 +91,13 @@ ph_start = ph_start.flatten()
 dV = dV.flatten()
 props = [{'dV': v} for v in dV]
 
-# n_tracers = 3
-# t_start = np.full(n_tracers, start_t)
-# r_start = np.full(n_tracers, 1000.)
-# th_start = np.full(n_tracers, np.pi/2)
-# ph_start = np.linspace(0, 2*np.pi, n_tracers, endpoint=False)
-
 x_start = r_start*np.sin(th_start)*np.cos(ph_start)
 y_start = r_start*np.sin(th_start)*np.sin(ph_start)
 z_start = r_start*np.cos(th_start)
 
 tracers = Tracers(
     positions=np.array([x_start, y_start, z_start]).T,
-    times=t_start,
+    times=times,
     props=props,
     vel_keys=[
         'tracer.hydro.aux.V_u_x',
@@ -107,7 +110,6 @@ tracers = Tracers(
 
 ##
 
-times = t_start
 file_times = file_handler.times
 n_files_per_step = file_handler.n_files_per_step
 forward = end_t > start_t
@@ -122,9 +124,10 @@ if forward:
 else:
     t_start = np.max(times)
     t_end = np.max(file_times[file_times <= end_t])
-    i_start = np.where(file_times == t_start)[0][0]
-    i_end = max(0, np.where(file_times == t_end)[0][0])
+    i_start = np.where(file_times >= t_start)[0].min()
+    i_end = max(0, np.where(file_times <= t_end)[0].max())
     chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step+1)
+    t_start = file_times[chunk_indices[0]]
     t_end = file_times[chunk_indices[-1]-n_files_per_step]
 
 print(f"Integrating from t={t_start} to t={t_end} with {len(chunk_indices)} chunks.")
@@ -172,9 +175,6 @@ ax[1].set_ylim(0, np.pi)
 ax[2].set_ylabel("phi")
 ax[2].set_ylim(0, 2*np.pi)
 
-print(np.array(tracers.tracers[0].positions).shape)
-print(max(np.array(tr.positions).max() for tr in tracers.tracers))
-print(min(np.array(tr.positions).min() for tr in tracers.tracers))
 for tr in tracers.tracers:
     t = np.array(tr.times) * 0.004925502303934785
     pos = np.array(tr.positions)
@@ -191,4 +191,12 @@ plt.savefig(f"{output_dir}/tracers_pos.png")
 
 for tr in tracers.tracers:
     tr.props['mass'] = tr.props['dV'] * tr.data['tracer.hydro.prim.rho'][0]
+
+    short_keys = {key: key.split(".")[-1] for key in tr.data.keys()}
+    for key, short in short_keys.items():
+        if short == key:
+            continue
+        tr.data[short] = tr.data[key]
+        del tr.data[key]
+
     tr.output_to_ascii(coords=['x', 'y', 'z'], filebase=filebase)

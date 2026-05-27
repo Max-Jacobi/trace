@@ -1,32 +1,33 @@
 
 from multiprocessing import Pool
 from sys import stdout
+from typing import Optional, Callable
 from tqdm import tqdm
 import atexit
 
 _pool = None
 _n_cpu = None
 
-def _get_pool(n_cpu):
-    """
-    Lazily initialize (or reuse) a module-level Pool of size n_cpu.
-    """
-    global _pool, _n_cpu
-    if _pool is None:
-        _pool = Pool(n_cpu)
-        _n_cpu = n_cpu
-        atexit.register(cleanup_pool)
-    elif _n_cpu != n_cpu:
-        raise RuntimeError(f"Tried to get pool with {n_cpu} cpus "
-                           f"but we only have one with {_n_cpu}!")
-    return _pool
-
-def cleanup_pool():
-    global _pool
-    if _pool is not None:
-        _pool.close()
-        _pool.join()
-        _pool = None
+# def _get_pool(n_cpu):
+#     """
+#     Lazily initialize (or reuse) a module-level Pool of size n_cpu.
+#     """
+#     global _pool, _n_cpu
+#     if _pool is None:
+#         _pool = Pool(n_cpu)
+#         _n_cpu = n_cpu
+#         atexit.register(cleanup_pool)
+#     elif _n_cpu != n_cpu:
+#         raise RuntimeError(f"Tried to get pool with {n_cpu} cpus "
+#                            f"but we only have one with {_n_cpu}!")
+#     return _pool
+# 
+# def cleanup_pool():
+#     global _pool
+#     if _pool is not None:
+#         _pool.close()
+#         _pool.join()
+#         _pool = None
 
 
 def do_parallel(
@@ -34,6 +35,9 @@ def do_parallel(
     args,
     n_cpu,
     verbose: bool = False,
+    initializer: Optional[Callable] = None,
+    initargs: Optional[tuple] = None,
+    chunksize: int = 1,
     **kwargs
 ):
     """
@@ -60,10 +64,15 @@ def do_parallel(
     kwargs.setdefault("ncols", 0)
     kwargs.setdefault("file", stdout)
 
+    if initargs is None:
+        initargs = tuple()
+
     if n_cpu == 1:
+        if initializer is not None:
+            initializer(*initargs)
         return list(tqdm(map(func, args), **kwargs))
-    pool = _get_pool(n_cpu)
-    return list(tqdm(pool.imap_unordered(func, args), **kwargs))
+    with Pool(n_cpu, initializer=initializer, initargs=initargs) as pool:
+        return list(tqdm(pool.imap_unordered(func, args, chunksize=chunksize), **kwargs))
 
 
 def _unpack_args(packed):

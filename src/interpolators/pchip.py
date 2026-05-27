@@ -32,6 +32,7 @@ class PchipInterpolator3D(InterpolatorBase):
         d = {k: np.asarray(v) for k, v in d.items()}
 
         self.keys = list(d.keys())
+        self.n_keys = len(self.keys)
 
         d0 = d[self.keys[0]]
         self.dtype = d0.dtype
@@ -40,19 +41,25 @@ class PchipInterpolator3D(InterpolatorBase):
         if x.shape[0] != self.nx or y.shape[0] != self.ny or z.shape[0] != self.nz:
             raise ValueError("x/y/z lengths must match d.shape")
 
-        self.dx = float(x[1] - x[0])
-        self.dy = float(y[1] - y[0])
-        self.dz = float(z[1] - z[0])
+        dx = np.diff(x)
+        dy = np.diff(y)
+        dz = np.diff(z)
+        self.dx = np.average(dx)
+        self.dy = np.average(dy)
+        self.dz = np.average(dz)
+        assert np.all(np.isclose(self.dx, dx))
+        assert np.all(np.isclose(self.dy, dy))
+        assert np.all(np.isclose(self.dz, dz))
         self.x0 = float(x[0])
         self.y0 = float(y[0])
         self.z0 = float(z[0])
 
         self._x_nodes = np.asarray(x)
-        self._y_nodes_full = np.asarray(y)
-        self._z_nodes_full = np.asarray(z)
+        self._y_nodes = np.asarray(y)
+        self._z_nodes = np.asarray(z)
 
         self._data = d
-        self._xp_cache: dict[tuple[int, int, str], PchipInterpolator] = {}
+        self._xp_cache: dict[tuple[int, int], PchipInterpolator] = {}
 
     @staticmethod
     def cell_index(xq, x0, dx, n):
@@ -64,12 +71,12 @@ class PchipInterpolator3D(InterpolatorBase):
             ix = n - 2
         return ix
 
-    def _get_x_interp(self, jy: int, kz: int, key: str):
-        cache_key = (jy, kz, key)
+    def _get_x_interp(self, jy: int, kz: int):
+        cache_key = (jy, kz)
         interp = self._xp_cache.get(cache_key)
         if interp is None:
-            yy = self._data[key][:, jy, kz]
-            interp = PchipInterpolator(self._x_nodes, yy, axis=0, extrapolate=True)
+            data = np.transpose([self._data[key][:, jy, kz] for key in self.keys])
+            interp = PchipInterpolator(self._x_nodes, data, axis=0, extrapolate=False)
             self._xp_cache[cache_key] = interp
         return interp
 
@@ -97,7 +104,7 @@ class PchipInterpolator3D(InterpolatorBase):
         n_points = flat_xi.size
 
         # Initialise output with NaN so out-of-domain points are returned as NaN
-        out = [np.full(n_points, np.nan, dtype=self.dtype) for _ in self.keys]
+        out = np.full((self.n_keys, n_points), np.nan, dtype=self.dtype)
 
         if n_points == 0:
             out_arr = np.asarray([o.reshape(xi.shape) for o in out])
@@ -136,27 +143,29 @@ class PchipInterpolator3D(InterpolatorBase):
             y_nodes = self.y0 + self.dy * y_indices
             z_nodes = self.z0 + self.dz * z_indices
 
-            for k_i, key in enumerate(self.keys):
-                n_group = xq.size
-                V = np.empty((4, 4, n_group), dtype=self.dtype)
+            n_group = xq.size
+            V = np.empty((4, 4, n_group, self.n_keys), dtype=self.dtype)
 
-                for jy_idx, jy in enumerate(y_indices):
-                    for kz_idx, kz in enumerate(z_indices):
-                        interp_x = self._get_x_interp(jy, kz, key)
-                        V[jy_idx, kz_idx, :] = interp_x(xq)
+            for jy_idx, jy in enumerate(y_indices):
+                for kz_idx, kz in enumerate(z_indices):
+                    interp_x = self._get_x_interp(jy, kz)
+                    V[jy_idx, kz_idx] = interp_x(xq)
 
-                W = np.empty((4, n_group), dtype=self.dtype)
+            final_vals = np.full((n_group, self.n_keys), np.nan)
+            for j, (y, z) in enumerate(zip(yq, zq)):
+                W = np.full((4, self.n_keys), np.nan)
                 for kz_idx in range(4):
-                    col = V[:, kz_idx, :]  # (4, n_group)
-                    py = PchipInterpolator(y_nodes, col, axis=0, extrapolate=False)
-                    vals = py(yq)
-                    W[kz_idx, :] = np.diag(vals)
+                    col = V[:, kz_idx, j, :]
+                    if not np.isfinite(col).all():
+                        continue
+                    py = PchipInterpolator(y_nodes, col, extrapolate=False)
+                    W[kz_idx] = py(y)
+                if not np.isfinite(W).all():
+                    continue
+                pz = PchipInterpolator(z_nodes, W, extrapolate=False)
+                final_vals[j] = pz(z)
 
-                pz = PchipInterpolator(z_nodes, W, axis=0, extrapolate=False)
-                vals_z = pz(zq)
-                final_vals = np.diag(vals_z)
-
-                out[k_i][idx_arr] = final_vals
+            out[:, idx_arr] = final_vals.T # reshape from (n_group, n_keys) to (n_keys, n_group)
 
         out = [o.reshape(xi.shape) for o in out]
         return np.asarray(out)

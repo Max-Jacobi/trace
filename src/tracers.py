@@ -4,7 +4,15 @@ from typing import Any
 
 from .integrators.base import IntegratorBase, InterpolatorCallable
 from .file import FileHandler
+from .utils import do_parallel
 
+# module level variables loaded on worker initialization
+_dt: float | None = None
+_time: float | None = None
+_integrator: IntegratorBase | None = None
+_vel_interpolators: list[InterpolatorCallable] | None = None
+_data_interpolator: InterpolatorCallable | None = None
+_keys: tuple[str, ...] | None = None
 
 class Tracer:
     """
@@ -84,6 +92,7 @@ class Tracers:
         self.vel_keys = vel_keys
         self.integrator = integrator
         self.file_handler = file_handler
+        self.pbar_pos = pbar_pos
 
         file_times = self.file_handler.times
 
@@ -96,24 +105,8 @@ class Tracers:
         if props is None:
             props = [{} for _ in range(positions.shape[0])]
 
-        self.tracers = [Tracer(id=i, position=pos, time=t, keys=self.file_handler.keys, props=prop)
-                        for i, (pos, t, prop) in enumerate(zip(positions, times, props))]
-
-        self.tqdm_kwargs = {
-            "unit": "step",
-            "position": pbar_pos,
-            "disable": pbar_pos < 0,
-            "ncols": 0,
-        }
-
-    def interpolate_data(
-        self,
-        positions: np.ndarray,
-        interpolator: InterpolatorCallable,
-        ) -> dict[str, np.ndarray]:
-
-        data = interpolator(positions)
-        return {k: data[idx] for idx, k in enumerate(self.file_handler.keys)}
+        self.tracers = np.array([Tracer(id=i, position=pos, time=t, keys=self.file_handler.keys, props=prop)
+                        for i, (pos, t, prop) in enumerate(zip(positions, times, props))])
 
 
     def integrate(self) -> None:
@@ -124,54 +117,139 @@ class Tracers:
         dts = np.diff(times)
         forward = dts[0] > 0
 
+        n_chunks = 5*self.file_handler.parallel_kwargs["n_cpu"]
+
         for i, (dt, time) in tqdm(
             enumerate(zip(dts, times)),
             desc="Integrating tracers",
             total=len(dts),
-            **self.tqdm_kwargs
+            position=self.pbar_pos,
+            unit="step",
+            ncols=0,
         ):
-            new_tracers = [tr for tr in self.tracers
-                           if len(tr.positions) == 0 and np.isclose(tr.initial_time, time)]
-            if new_tracers:
-                new_pos = np.array([tr.initial_position for tr in new_tracers]).T
-                data = self.interpolate_data(new_pos, data_interpolators[i])
-                for j, tr in enumerate(new_tracers):
-                   tr.add_step(
-                       position=tr.initial_position,
-                       time=tr.initial_time,
-                       data={k: data[k][j] for k in self.file_handler.keys},
-                   )
+            new_tracers = np.array([tr for tr in self.tracers 
+                                    if len(tr.positions) == 0 and np.isclose(tr.initial_time, time)])
+            if len(new_tracers) > 0:
+                init_pos = np.array([tracer.initial_position for tracer in new_tracers]).T
+                initial_data = data_interpolators[i](init_pos) #shape (n_keys, n_tracers)
+                for tr, data in zip(new_tracers, initial_data.T):
+                    tr.add_step(
+                        position=tr.initial_position,
+                        time=tr.initial_time,
+                        data=dict(zip(self.file_handler.keys, data)),
+                    )
+                    tr.active = True
 
-            for tr in self.tracers:
-                tr.active = (len(tr.times) > 0) and not tr.done and (
-                    (forward and tr.times[-1] <= time) or
-                    (not forward and tr.times[-1] >= time)
-                )
             active_tracers = [tr for tr in self.tracers if tr.active]
-            if not any(active_tracers):
+            active_idxs = [i for i, tr in enumerate(self.tracers) if tr.active]
+
+            if len(active_tracers) == 0:
                 continue
 
-            pos = np.array([tracer.positions[-1] for tracer in active_tracers]).T
+            chunks = np.array_split(active_tracers, n_chunks)
+            chunks = [ch for ch in chunks if ch.size>0]
 
+            chunks = do_parallel(
+                _do_integrate_vectorized,
+                chunks,
+                desc=f"  Step {i}",
+                total=len(chunks),
+                position=self.pbar_pos+1,
+                leave=False,
+                unit="chunks",
+                ncols=0,
+                initializer=_init_worker,
+                initargs=(
+                    time,
+                    dt,
+                    self.integrator,
+                    vel_interpolators[i:i+2],
+                    data_interpolators[i+1],
+                    self.file_handler.keys,
+                ),
+                **self.file_handler.parallel_kwargs,
+            )
 
-            new_x = self.integrator(xn=pos, dt=dt, interps=vel_interpolators[i:i+2],)
-            nan_mask = np.isnan(new_x).any(axis=0)
-            for j, tracer in enumerate(active_tracers):
-                if nan_mask[j]:
-                    tracer.done = True
-                    tracer.active = False
+            self.tracers[active_idxs] = np.concatenate(chunks)
 
-            new_data = {k: np.full(len(active_tracers), np.nan) for k in self.file_handler.keys}
-            for k, data in self.interpolate_data(new_x[:, ~nan_mask], data_interpolators[i+1]).items():
-                new_data[k][~nan_mask] = data
-
-            for j, tracer in enumerate(active_tracers):
-                if nan_mask[j]:
-                    continue
-                tracer.add_step(
-                    position=new_x[:, j],
-                    time=time + dt,
-                    data={k: new_data[k][j] for k in self.file_handler.keys},
-                )
         print(f"{sum(tr.done for tr in self.tracers)} tracers done. "
               f"{sum(tr.active for tr in self.tracers)} tracers active.")
+
+def _init_worker(
+    time: float,
+    dt: float,
+    integrator: IntegratorBase,
+    vel_interpolators: list[InterpolatorCallable],
+    data_interpolator: InterpolatorCallable,
+    keys: tuple[str, ...],
+):
+    global _dt, _time, _integrator, _vel_interpolators, _data_interpolator, _keys, _dt
+
+    _dt = dt
+    _time = time
+    _integrator = integrator
+    _vel_interpolators = vel_interpolators
+    _data_interpolator = data_interpolator
+    _keys = keys
+
+
+def _do_integrate(tracer: Tracer):
+    global _dt, _integrator, _vel_interpolators, _data_interpolator, _keys, _dt
+    new_x = _integrator(
+            xn=tracer.positions[-1],
+            dt=_dt,
+            interps=_vel_interpolators,
+    )
+
+    if np.isnan(new_x).any():
+        # tracer has reached domain boundary
+        tracer.done = True
+        tracer.active = False
+        return
+
+    raw_data = _data_interpolator(new_x)
+    new_data = {k: raw_data[idx] for idx, k in enumerate(_keys)}
+
+    tracer.add_step(
+        position=new_x,
+        time=_time + _dt,
+        data={k: new_data[k] for k in _keys},
+    )
+
+    return tracer
+
+def _do_integrate_vectorized(tracers: list[Tracer]):
+    global _dt, _integrator, _vel_interpolators, _data_interpolator, _keys, _dt
+    tracers = np.array(tracers)
+
+    positions = np.transpose([tracer.positions[-1] for tracer in tracers])
+
+    new_pos = _integrator(
+            xn=positions,
+            dt=_dt,
+            interps=_vel_interpolators,
+    )
+
+    valid_mask = np.isfinite(new_pos).all(axis=0)
+    for tracer in tracers[~valid_mask]:
+        # tracer has reached domain boundary
+        tracer.done = True
+        tracer.active = False
+
+    valid_pos = new_pos[:, valid_mask]
+    valid_tracers = tracers[valid_mask]
+
+    new_data = _data_interpolator(valid_pos)
+
+    for tracer, new_x, data in zip(
+            valid_tracers,
+            valid_pos.T,
+            new_data.T
+        ):
+        tracer.add_step(
+            position=new_x,
+            time=_time + _dt,
+            data=dict(zip(_keys, data)),
+        )
+
+    return tracers
