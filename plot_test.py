@@ -1,0 +1,115 @@
+%load_ext autoreload
+%autoreload 2
+
+import pathlib as pl
+import numpy as np
+from matplotlib import pyplot as plt
+from matplotlib.colors import Normalize, LogNorm
+
+from src.trajectory import Trajectory
+import tabulatedEOS.unit_system as us
+
+lfac = us.GeometricSolar.LengthConversion(us.CGS)*1e-5
+tfac = us.GeometricSolar.TimeConversion(us.CGS)*1000
+Tfac = us.GeometricSolar.TemperatureConversion(us.CGS)/1e9
+rhofac = us.GeometricSolar.MassDensityConversion(us.CGS)
+
+##
+
+path = "test_nr30_nth15_nph30_impl_pch"
+prefix = "tracer_"
+
+files = sorted(pl.Path(path).glob(f"{prefix}*.dat"))
+
+trajs = [Trajectory.from_ascii(str(f), shorten_keys=True) for f in files]
+
+print(f"Loaded {len(trajs)} trajectories.")
+
+
+for traj in trajs:
+    traj.data["r"] = np.sqrt(traj.data["x"]**2 + traj.data["y"]**2 + traj.data["z"]**2)
+    phi = np.arctan2(traj.data["y"], traj.data["x"])
+    phi[phi < 0] += 2*np.pi
+    phi = np.unwrap(phi) * 180/np.pi
+    theta = np.arccos(traj.data["z"]/traj.data["r"]) * 180/np.pi
+    traj.data["phi"] = phi
+    traj.data["theta"] = theta
+
+##
+
+fig, ax = plt.subplots(2, 3, figsize=(15, 10))
+
+ye_norm = Normalize(vmin=0.1, vmax=0.6)
+theta_norm = Normalize(vmin=0, vmax=90)
+cmap = plt.get_cmap("jet_r")
+for traj in trajs[::5]:
+    t = traj.data["time"] * tfac
+    r = traj.data["r"] * lfac
+    theta = traj.data["theta"]
+    phi = traj.data["phi"]
+
+    T = traj.data["T"] * Tfac
+    rho = traj.data["rho"] * rhofac
+    ye = traj.data["r_0"]
+    # color = cmap(ye_norm(np.average(ye)))
+    color = cmap(theta_norm(np.abs(np.average(theta)-90)))
+
+    kw = dict(lw=.3, alpha=.5, c=color)
+    ax[0, 0].plot(t, r, **kw)
+    ax[0, 1].plot(t, phi, **kw)
+    ax[0, 2].plot(t, theta, **kw)
+    ax[1, 0].plot(t, rho, **kw)
+    ax[1, 1].plot(t, T, **kw)
+    ax[1, 2].plot(t, ye, **kw)
+for a, yl in zip(ax.flat, ["r (km)", "phi (deg)", "theta (deg)",
+                           r"$\rho$ (g/cm$^3$)", "T (GK)", r"$Y_e$"]):
+    a.set_xlabel("time (ms)")
+    a.set_ylabel(yl)
+ax[1, 0].set_yscale("log")
+plt.colorbar(plt.cm.ScalarMappable(norm=theta_norm, cmap=cmap), label="theta (deg)", ax=ax[0, 2])
+plt.gca().set_rasterization_zorder(-1)
+plt.savefig("test_traj.png", dpi=300, bbox_inches="tight")
+
+##
+
+def at_6GK(traj, key):
+    T = traj.data["T"] * Tfac
+    return np.interp(6, T[::-1], traj.data[key][::-1])
+
+mm = np.array([traj.props['mass'] for traj in trajs])
+ye0 = np.array([at_6GK(traj, 'r_0') for traj in trajs])
+th = np.array([traj.data['theta'][-1] for traj in trajs])
+t_ej = np.array([traj.data['time'][0] for traj in trajs]) * us.GeometricSolar.TimeConversion(us.CGS)*1000
+T0 = np.array([traj.data['T'][0] for traj in trajs]) * Tfac
+plt.hist(T0, bins=30, weights=mm, histtype="step", label="Ye0");
+# plt.xlabel(r"$Y_e$ at 6 GK")
+plt.xlabel(r"$T_0$ (GK)")
+plt.ylabel(r"$\Delta m$ (M$_\odot$)")
+# plt.savefig("test_traj_T0_hist.png", dpi=300, bbox_inches="tight")
+# plt.hist(t_ej, bins=30, weights=mm, histtype="step", label="t_ej")
+# plt.hist(th, bins=30, weights=mm, histtype="step", label="theta")
+
+##
+
+x_grid = np.linspace(150, 1000, 50)
+dye_grid = np.geomspace(1e-7, 2e-3, 50)
+fig, axs = plt.subplots(1, 3, figsize=(12, 3))
+norm = LogNorm(1, 1e4)
+for ax, direc in zip(axs, 'xyz'):
+    img = np.zeros((len(dye_grid), len(x_grid)))
+    for traj in trajs:
+        dyedt = np.gradient(traj.data['r_0'], traj.data['time'])
+        # plt.plot(traj.data['r'], np.abs(dyedt), lw=1, c='k', alpha=0.05)
+        i_x = np.digitize(traj.data[direc], x_grid) - 1
+        i_dye = np.digitize(np.abs(dyedt), dye_grid) - 1
+        for ix, idye in zip(i_x, i_dye):
+            if 0 <= ix < len(x_grid) and 0 <= idye < len(dye_grid):
+                img[idye, ix] += 1
+    im = ax.pcolormesh(x_grid*lfac, dye_grid/tfac, img, norm=norm, cmap="nipy_spectral")
+    ax.set_xlabel(f"{direc} (km)")
+    # ax.set_xlim(150, 1000)
+    ax.set_yscale("log")
+plt.colorbar(im, label="Number of tracers", ax=axs)
+axs[0].set_ylabel(r"$|\dot{Y_e}|$ [1/ms]")
+# plt.tight_layout()
+plt.savefig("test_traj_dye.png", dpi=300, bbox_inches="tight")

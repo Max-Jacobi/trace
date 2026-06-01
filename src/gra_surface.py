@@ -5,6 +5,7 @@ GRA Surface Module
   See github.com/computationalrelativity/gr-athena for more details.
 """
 
+import signal
 from pathlib import Path
 from typing import Any, Callable
 from multiprocessing.shared_memory import SharedMemory
@@ -60,11 +61,11 @@ class GRASurfaceFileHandler(FileHandler):
         surface_num: int = 1,
         **kwargs
         ) -> None:
-        self.extra_data = {'interpolator': interpolator}
+        self.extra_data = {'interpolator': interpolator, 'log_rad': log_rad}
         self.n_ghosts = interpolator.n_ghosts
         self.surface_num = surface_num
-        self.log_rad = log_rad
         super().__init__(*args, **kwargs)
+        signal.signal(signal.SIGINT, self.handler)
 
     def list_files(self, directory: str) -> list[str]:
         path = Path(directory)
@@ -154,28 +155,29 @@ class GRASurfaceFileHandler(FileHandler):
                     finally:
                         shm.close()
 
+    @staticmethod
     def setup_interpolator(
-        self,
         shared_memory: dict[str, str],
         extra_data: Any = None,
         ) -> InterpolatorBase:
 
-        data = {}
-        shm = {}
-        for key, shm_name in shared_memory.items():
-            shm[key] = SharedMemory(name=shm_name)
-            data[key] = np.ndarray(
-                shape=extra_data['shape'],
-                dtype=np.float64,
-                buffer=shm[key].buf
-                )
-
         r = extra_data['r']
         th = extra_data['th']
         phi = extra_data['ph']
-
         interpolator = extra_data['interpolator']
-        log_coords = [0] if self.log_rad else []
-        interpolator = CartesianToSpherical(interpolator, r, th, phi, d=data, log_coords=log_coords)
-        interpolator.shared_memory = shm # Store shared memory references to prevent premature cleanup
+        log_coords = [0] if extra_data['log_rad'] else []
+        interpolator = CartesianToSpherical(interpolator, r, th, phi,
+                                            shm=shared_memory,
+                                            log_coords=log_coords,
+                                            shape=extra_data['shape']
+                                            )
         return interpolator
+
+
+    def handler(self, signum, frame):
+        """
+        Signal handler for graceful shutdown on interrupt signal.
+        """
+        if signum == signal.SIGINT:
+            print("Received interrupt signal. Exiting gracefully...")
+            self.free_shared_memory()

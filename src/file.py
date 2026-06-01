@@ -21,7 +21,7 @@ from .interpolators.base import InterpolatorBase
 
 
 class FileHandler(ABC):
-    files: list[dict[str, list[str]]] # list of dictionaries linking file paths with contained data keys
+    files: np.ndarray  # array of dictionaries linking file paths with metadata for loading
     times: np.ndarray  # array of times corresponding to the files
     keys: list[str]  # list of required data keys
     memory_size: int  # maximum memory size required to load data per key
@@ -125,9 +125,9 @@ class FileHandler(ABC):
         """
         pass
 
+    @staticmethod
     @abstractmethod
     def setup_interpolator(
-        self,
         shared_memory: dict[str, str],
         extra_data: Any = None,
         ) -> InterpolatorBase:
@@ -164,6 +164,7 @@ class FileHandler(ABC):
             type(self).parse_file,
             [(file_path, self.keys, self.extra_data) for file_path in file_list],
             desc="Parsing files",
+            unit="files",
             **self.parallel_kwargs
         ):
             if not file_path:
@@ -252,10 +253,16 @@ class FileHandler(ABC):
 
 
 
-    def setup_interpolators(self, keys: list[str]) -> list[InterpolatorBase]:
+    @classmethod
+    def setup_interpolators(
+        cls,
+        keys: list[str],
+        shared_memory: tuple[dict[str, str], ...],
+        extra_data: Any = None,
+        ) -> list[InterpolatorBase]:
         """
         Setup interpolators for currently loaded data in shared memory.
           Should be called after load_chunk on each process.
         """
-        return [self.setup_interpolator({key: shm_names[key] for key in keys}, self.extra_data)
-                for shm_names in self.shared_memory[:len(self.cur_times)]]
+        return [cls.setup_interpolator({key: shm_names[key] for key in keys}, extra_data)
+                for shm_names in shared_memory]

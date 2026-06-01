@@ -1,13 +1,13 @@
-
 from multiprocessing import Pool
+from itertools import count, repeat
 from sys import stdout
-from typing import Optional, Callable
+from typing import Optional, Callable, Iterable
 from tqdm import tqdm
 import atexit
 
-_pool = None
-_n_cpu = None
-
+# _pool: Optional[Pool] = None
+# _n_cpu: Optional[int] = None
+#
 # def _get_pool(n_cpu):
 #     """
 #     Lazily initialize (or reuse) a module-level Pool of size n_cpu.
@@ -16,27 +16,41 @@ _n_cpu = None
 #     if _pool is None:
 #         _pool = Pool(n_cpu)
 #         _n_cpu = n_cpu
-#         atexit.register(cleanup_pool)
+#         atexit.register(_cleanup_pool)
 #     elif _n_cpu != n_cpu:
 #         raise RuntimeError(f"Tried to get pool with {n_cpu} cpus "
 #                            f"but we only have one with {_n_cpu}!")
 #     return _pool
-# 
-# def cleanup_pool():
+#
+# def _cleanup_pool():
 #     global _pool
 #     if _pool is not None:
 #         _pool.close()
 #         _pool.join()
 #         _pool = None
 
+def _pack_args(args_list, func):
+    packed_args = []
+    for item in args_list:
+        if isinstance(item, dict):
+            packed_args.append((func, (), item))
+        elif isinstance(item, (tuple, list)) and len(item) == 2 and isinstance(item[1], dict):
+            packed_args.append((func, item[0], item[1]))
+        else:
+            packed_args.append((func, item, {}))
+    return packed_args
+
+def _unpack_args(packed):
+    func, args, kwargs = packed
+    return func(*args, **kwargs)
 
 def do_parallel(
-    func,
-    args,
-    n_cpu,
-    verbose: bool = False,
+    func: Callable,
+    args: Iterable,
+    n_cpu: int,
     initializer: Optional[Callable] = None,
-    initargs: Optional[tuple] = None,
+    initargs: Optional[Iterable] = None,
+    verbose: bool = False,
     chunksize: int = 1,
     **kwargs
 ):
@@ -50,6 +64,10 @@ def do_parallel(
         An iterable of arguments to pass to func.
     n_cpu : int
         Number of CPUs to use.
+    initializer : callable, optional
+        A function to initialize each worker process. It will be called with the arguments in initargs
+    initargs : iterable, optional
+        An iterable of arguments to pass to the initializer function for each worker process.
     verbose : bool
         Whether to show a progress bar.
     **kwargs
@@ -59,31 +77,30 @@ def do_parallel(
     list
         Results from all function calls.
     """
-    kwargs.setdefault("total", len(args))
+    try:
+        kwargs.setdefault("total", len(args))
+    except TypeError:
+        ...
     kwargs.setdefault("disable", not verbose)
     kwargs.setdefault("ncols", 0)
     kwargs.setdefault("file", stdout)
 
     if initargs is None:
-        initargs = tuple()
+        initargs = ()
 
     if n_cpu == 1:
         if initializer is not None:
             initializer(*initargs)
         return list(tqdm(map(func, args), **kwargs))
+
     with Pool(n_cpu, initializer=initializer, initargs=initargs) as pool:
         return list(tqdm(pool.imap_unordered(func, args, chunksize=chunksize), **kwargs))
 
 
-def _unpack_args(packed):
-    func, args, kwargs = packed
-    return func(*args, **kwargs)
-
-
 def do_parallel_star(
-    func,
-    args_list,
-    n_cpu,
+    func: Callable,
+    args_list: Iterable[tuple],
+    n_cpu: int,
     verbose: bool = False,
     **kwargs
 ):
@@ -111,13 +128,5 @@ def do_parallel_star(
     list
         Results from all function calls.
     """
-    packed_args = []
-    for item in args_list:
-        if isinstance(item, dict):
-            packed_args.append((func, (), item))
-        elif isinstance(item, (tuple, list)) and len(item) == 2 and isinstance(item[1], dict):
-            packed_args.append((func, item[0], item[1]))
-        else:
-            packed_args.append((func, item, {}))
-
+    packed_args = _pack_args(args_list, func)
     return do_parallel(_unpack_args, packed_args, n_cpu, verbose=verbose, **kwargs)

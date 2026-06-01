@@ -1,18 +1,19 @@
+import pickle, time
 import numpy as np
+from itertools import repeat
 from tqdm import tqdm
-from typing import Any
+from typing import Any, Optional
 
 from .integrators.base import IntegratorBase, InterpolatorCallable
 from .file import FileHandler
-from .utils import do_parallel
+from .utils import do_parallel, do_parallel_star
 
-# module level variables loaded on worker initialization
-_dt: float | None = None
-_time: float | None = None
-_integrator: IntegratorBase | None = None
-_vel_interpolators: list[InterpolatorCallable] | None = None
-_data_interpolator: InterpolatorCallable | None = None
-_keys: tuple[str, ...] | None = None
+_time: Optional[float] = None
+_dt: Optional[float] = None
+_integrator: Optional[IntegratorBase] = None
+_vel_interpolators: Optional[list[InterpolatorCallable]] = None
+_data_interpolator: Optional[InterpolatorCallable] = None
+_keys: Optional[tuple[str, ...]] = None
 
 class Tracer:
     """
@@ -109,26 +110,37 @@ class Tracers:
                         for i, (pos, t, prop) in enumerate(zip(positions, times, props))])
 
 
-    def integrate(self) -> None:
-        vel_interpolators = self.file_handler.setup_interpolators(self.vel_keys)
-        data_interpolators = self.file_handler.setup_interpolators(self.file_handler.keys)
-
+    def integrate_loaded_chunk(self) -> None:
         times = self.file_handler.cur_times
         dts = np.diff(times)
-        forward = dts[0] > 0
 
-        n_chunks = 5*self.file_handler.parallel_kwargs["n_cpu"]
+        kwargs = dict(shared_memory=self.file_handler.shared_memory[:len(times)], extra_data=self.file_handler.extra_data)
+        vel_interpolators = self.file_handler.setup_interpolators(self.vel_keys, **kwargs)
+        data_interpolators = self.file_handler.setup_interpolators(self.file_handler.keys, **kwargs)
+
+        n_bunches = 5*self.file_handler.parallel_kwargs["n_cpu"]
 
         for i, (dt, time) in tqdm(
             enumerate(zip(dts, times)),
             desc="Integrating tracers",
             total=len(dts),
             position=self.pbar_pos,
-            unit="step",
+            unit="time step",
             ncols=0,
         ):
-            new_tracers = np.array([tr for tr in self.tracers 
+
+            initargs = (
+                time,
+                dt,
+                self.integrator,
+                vel_interpolators[i:i+2],
+                data_interpolators[i+1],
+                self.file_handler.keys,
+            )
+
+            new_tracers = np.array([tr for tr in self.tracers
                                     if len(tr.positions) == 0 and np.isclose(tr.initial_time, time)])
+
             if len(new_tracers) > 0:
                 init_pos = np.array([tracer.initial_position for tracer in new_tracers]).T
                 initial_data = data_interpolators[i](init_pos) #shape (n_keys, n_tracers)
@@ -146,34 +158,57 @@ class Tracers:
             if len(active_tracers) == 0:
                 continue
 
-            chunks = np.array_split(active_tracers, n_chunks)
-            chunks = [ch for ch in chunks if ch.size>0]
+            bunches = np.array_split(active_tracers, n_bunches)
+            bunches = [b for b in bunches if len(b) > 0]
 
-            chunks = do_parallel(
-                _do_integrate_vectorized,
-                chunks,
+            bunches = do_parallel_star(
+                _integrate_vectorized,
+                zip(bunches, repeat(time)),
                 desc=f"  Step {i}",
-                total=len(chunks),
+                total=len(bunches),
+                initializer=_init_worker,
+                initargs=initargs,
                 position=self.pbar_pos+1,
                 leave=False,
-                unit="chunks",
+                unit="bunches",
                 ncols=0,
-                initializer=_init_worker,
-                initargs=(
-                    time,
-                    dt,
-                    self.integrator,
-                    vel_interpolators[i:i+2],
-                    data_interpolators[i+1],
-                    self.file_handler.keys,
-                ),
                 **self.file_handler.parallel_kwargs,
             )
 
-            self.tracers[active_idxs] = np.concatenate(chunks)
+            self.tracers[active_idxs] = np.concatenate(bunches)
+
 
         print(f"{sum(tr.done for tr in self.tracers)} tracers done. "
               f"{sum(tr.active for tr in self.tracers)} tracers active.")
+
+    def integrate(self, start_t: float, end_t: float) -> None:
+
+        file_times = self.file_handler.times
+        n_files_per_step = self.file_handler.n_files_per_step
+        forward = end_t > start_t
+
+        if forward:
+            t_start = np.min(file_times[file_times >= start_t])
+            t_end = np.max(file_times[file_times <= end_t])
+            i_start = file_times.searchsorted(t_start, side='left')
+            i_end = file_times.searchsorted(t_end, side='left')
+            chunk_indices = np.arange(i_start, i_end+1, n_files_per_step-1)
+        else:
+            t_start = np.max(file_times[file_times <= start_t])
+            t_end = np.min(file_times[file_times >= end_t])
+            i_start = file_times.searchsorted(t_start, side='left')
+            i_end = file_times.searchsorted(t_end, side='left')
+            chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step+1)
+        print(f"Integrating from t={t_start} to t={t_end} with {len(chunk_indices)} chunks.")
+        print(f"Chunk times: {file_times[chunk_indices]}")
+
+        for i_step in chunk_indices:
+            self.file_handler.load_chunk(i_step, forward=forward)
+            self.integrate_loaded_chunk()
+            if all(tr.done for tr in self.tracers):
+                print("All tracers done. Stopping integration.")
+                break
+
 
 def _init_worker(
     time: float,
@@ -182,45 +217,19 @@ def _init_worker(
     vel_interpolators: list[InterpolatorCallable],
     data_interpolator: InterpolatorCallable,
     keys: tuple[str, ...],
-):
-    global _dt, _time, _integrator, _vel_interpolators, _data_interpolator, _keys, _dt
-
-    _dt = dt
+    ) -> None:
+    global _time, _dt, _vel_interpolators, _data_interpolator, _keys, _integrator
     _time = time
-    _integrator = integrator
+    _dt = dt
     _vel_interpolators = vel_interpolators
     _data_interpolator = data_interpolator
     _keys = keys
+    _integrator = integrator
 
 
-def _do_integrate(tracer: Tracer):
-    global _dt, _integrator, _vel_interpolators, _data_interpolator, _keys, _dt
-    new_x = _integrator(
-            xn=tracer.positions[-1],
-            dt=_dt,
-            interps=_vel_interpolators,
-    )
-
-    if np.isnan(new_x).any():
-        # tracer has reached domain boundary
-        tracer.done = True
-        tracer.active = False
-        return
-
-    raw_data = _data_interpolator(new_x)
-    new_data = {k: raw_data[idx] for idx, k in enumerate(_keys)}
-
-    tracer.add_step(
-        position=new_x,
-        time=_time + _dt,
-        data={k: new_data[k] for k in _keys},
-    )
-
-    return tracer
-
-def _do_integrate_vectorized(tracers: list[Tracer]):
-    global _dt, _integrator, _vel_interpolators, _data_interpolator, _keys, _dt
-    tracers = np.array(tracers)
+def _integrate_vectorized(tracers: np.ndarray, time) -> np.ndarray:
+    global _time, _dt, _vel_interpolators, _data_interpolator, _keys, _integrator
+    assert _time is not None and _time == time, "Worker not initialized with correct time"
 
     positions = np.transpose([tracer.positions[-1] for tracer in tracers])
 
@@ -229,7 +238,6 @@ def _do_integrate_vectorized(tracers: list[Tracer]):
             dt=_dt,
             interps=_vel_interpolators,
     )
-
     valid_mask = np.isfinite(new_pos).all(axis=0)
     for tracer in tracers[~valid_mask]:
         # tracer has reached domain boundary
@@ -248,7 +256,7 @@ def _do_integrate_vectorized(tracers: list[Tracer]):
         ):
         tracer.add_step(
             position=new_x,
-            time=_time + _dt,
+            time=time + _dt,
             data=dict(zip(_keys, data)),
         )
 

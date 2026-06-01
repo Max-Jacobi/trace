@@ -6,13 +6,14 @@ Vectorized query evaluation + lazy caching of x-interpolators.
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from collections import defaultdict
+from multiprocessing.shared_memory import SharedMemory
 
-from .base import InterpolatorBase, OutOfBoundsError
+from .base import InterpolatorBase
 
 class PchipInterpolator3D(InterpolatorBase):
     n_ghosts = 3
 
-    def __init__(self, *coords: np.ndarray, d: dict[str, np.ndarray], log_coords: list[int] = []):
+    def __init__(self, *coords: np.ndarray, shm: dict[str, str], shape: tuple[int, int, int], log_coords: list[int] = []):
         self.log_coords = log_coords
 
         transformed = []
@@ -29,17 +30,16 @@ class PchipInterpolator3D(InterpolatorBase):
                 transformed.append(c)
         x, y, z = transformed
 
-        d = {k: np.asarray(v) for k, v in d.items()}
 
-        self.keys = list(d.keys())
+
+        self.keys = list(shm.keys())
         self.n_keys = len(self.keys)
 
-        d0 = d[self.keys[0]]
-        self.dtype = d0.dtype
-        self.nx, self.ny, self.nz = d0.shape
-
-        if x.shape[0] != self.nx or y.shape[0] != self.ny or z.shape[0] != self.nz:
-            raise ValueError("x/y/z lengths must match d.shape")
+        self.nx = x.shape[0]
+        self.ny = y.shape[0]
+        self.nz = z.shape[0]
+        self.shape = shape
+        assert shape == (self.nx, self.ny, self.nz)
 
         dx = np.diff(x)
         dy = np.diff(y)
@@ -58,7 +58,8 @@ class PchipInterpolator3D(InterpolatorBase):
         self._y_nodes = np.asarray(y)
         self._z_nodes = np.asarray(z)
 
-        self._data = d
+        self.shm = shm
+
         self._xp_cache: dict[tuple[int, int], PchipInterpolator] = {}
 
     @staticmethod
@@ -75,7 +76,14 @@ class PchipInterpolator3D(InterpolatorBase):
         cache_key = (jy, kz)
         interp = self._xp_cache.get(cache_key)
         if interp is None:
-            data = np.transpose([self._data[key][:, jy, kz] for key in self.keys])
+            data = np.empty((self.n_keys, self.nx), dtype=np.float64)
+            for i_k, key in enumerate(self.keys):
+                shm = SharedMemory(name=self.shm[key])
+                try:
+                    data[i_k] = np.ndarray(shape=self.shape, dtype=np.float64, buffer=shm.buf)[:, jy, kz]
+                finally:
+                    shm.close()
+            data = np.transpose(data)
             interp = PchipInterpolator(self._x_nodes, data, axis=0, extrapolate=False)
             self._xp_cache[cache_key] = interp
         return interp
@@ -104,7 +112,7 @@ class PchipInterpolator3D(InterpolatorBase):
         n_points = flat_xi.size
 
         # Initialise output with NaN so out-of-domain points are returned as NaN
-        out = np.full((self.n_keys, n_points), np.nan, dtype=self.dtype)
+        out = np.full((self.n_keys, n_points), np.nan)
 
         if n_points == 0:
             out_arr = np.asarray([o.reshape(xi.shape) for o in out])
@@ -144,7 +152,7 @@ class PchipInterpolator3D(InterpolatorBase):
             z_nodes = self.z0 + self.dz * z_indices
 
             n_group = xq.size
-            V = np.empty((4, 4, n_group, self.n_keys), dtype=self.dtype)
+            V = np.empty((4, 4, n_group, self.n_keys))
 
             for jy_idx, jy in enumerate(y_indices):
                 for kz_idx, kz in enumerate(z_indices):
