@@ -12,7 +12,6 @@ import argparse as ap
 import h5py as h5
 import numpy as np
 from tqdm import tqdm
-from tabulatedEOS import unit_system as us
 
 def read_file(file_path: str) -> tuple[dict, dict]:
     with h5.File(file_path, 'r') as f:
@@ -88,6 +87,10 @@ if __name__ == "__main__":
     print(args.input_files)
     for file_path in tqdm(args.input_files, desc="Transforming files", unit="file", ncols=0):
         coordinates, data = read_file(file_path)
+        try:
+            reduce_m1_quantities(data)
+        except KeyError:
+            pass
         output_path = f"{args.output_dir}/{file_path.split('/')[-1]}"
         write_file(coordinates, data, output_path)
         print(f"Transformed {file_path} and saved to {output_path}")
