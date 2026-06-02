@@ -30,8 +30,6 @@ class PchipInterpolator3D(InterpolatorBase):
                 transformed.append(c)
         x, y, z = transformed
 
-
-
         self.keys = list(shm.keys())
         self.n_keys = len(self.keys)
 
@@ -58,9 +56,24 @@ class PchipInterpolator3D(InterpolatorBase):
         self._y_nodes = np.asarray(y)
         self._z_nodes = np.asarray(z)
 
-        self.shm = shm
+
+        self.shm_names = shm
+        self.shm: dict[str, SharedMemory] = {}
 
         self._xp_cache: dict[tuple[int, int], PchipInterpolator] = {}
+
+        self.data: dict[str, np.ndarray] = {}
+
+    def load(self):
+        for key in self.keys:
+            shm = SharedMemory(name=self.shm_names[key])
+            self.shm[key] = shm
+            self.data[key] = np.ndarray(self.shape, dtype=np.float64, buffer=shm.buf)
+
+    def __del__(self):
+        for key, shm in self.shm.items():
+            shm.close()
+            del self.data[key]
 
     @staticmethod
     def cell_index(xq, x0, dx, n):
@@ -78,11 +91,7 @@ class PchipInterpolator3D(InterpolatorBase):
         if interp is None:
             data = np.empty((self.n_keys, self.nx), dtype=np.float64)
             for i_k, key in enumerate(self.keys):
-                shm = SharedMemory(name=self.shm[key])
-                try:
-                    data[i_k] = np.ndarray(shape=self.shape, dtype=np.float64, buffer=shm.buf)[:, jy, kz]
-                finally:
-                    shm.close()
+                data[i_k] = self.data[key][:, jy, kz]
             data = np.transpose(data)
             interp = PchipInterpolator(self._x_nodes, data, axis=0, extrapolate=False)
             self._xp_cache[cache_key] = interp

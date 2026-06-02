@@ -31,7 +31,7 @@ class ReducedSurfaceFileHandler(FileHandler):
         interpolator: type[InterpolatorBase],
         *args,
         log_rad: bool = True,
-        file_pattern: str = "*.h5",
+        file_pattern: str = "*.hdf5",
         **kwargs,
     ) -> None:
         self.extra_data = {"interpolator": interpolator, "log_rad": log_rad}

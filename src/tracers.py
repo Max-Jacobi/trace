@@ -226,6 +226,9 @@ def _init_worker(
     _keys = keys
     _integrator = integrator
 
+    for interp in (*_vel_interpolators, _data_interpolator):
+        interp.load()
+
 
 def _integrate_vectorized(tracers: np.ndarray, time) -> np.ndarray:
     global _time, _dt, _vel_interpolators, _data_interpolator, _keys, _integrator
