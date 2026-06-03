@@ -247,6 +247,7 @@ class FileHandler(ABC):
             type(self).load_step_to_memory,
             tasks,
             desc=msg,
+            unit="file",
             **self.parallel_kwargs
         )
         self.cur_times = self.times[indices]

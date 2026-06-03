@@ -143,7 +143,9 @@ class Tracers:
 
             if len(new_tracers) > 0:
                 init_pos = np.array([tracer.initial_position for tracer in new_tracers]).T
+                data_interpolators[i].load()
                 initial_data = data_interpolators[i](init_pos) #shape (n_keys, n_tracers)
+                data_interpolators[i].unload()
                 for tr, data in zip(new_tracers, initial_data.T):
                     tr.add_step(
                         position=tr.initial_position,
@@ -225,10 +227,8 @@ def _init_worker(
     _data_interpolator = data_interpolator
     _keys = keys
     _integrator = integrator
-
     for interp in (*_vel_interpolators, _data_interpolator):
         interp.load()
-
 
 def _integrate_vectorized(tracers: np.ndarray, time) -> np.ndarray:
     global _time, _dt, _vel_interpolators, _data_interpolator, _keys, _integrator
