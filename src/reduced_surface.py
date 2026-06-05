@@ -34,10 +34,11 @@ class ReducedSurfaceFileHandler(FileHandler):
         file_pattern: str = "*.hdf5",
         **kwargs,
     ) -> None:
-        self.extra_data = {"interpolator": interpolator, "log_rad": log_rad}
-        self.n_ghosts = interpolator.n_ghosts
         self.file_pattern = file_pattern
+        self.n_ghosts = interpolator.n_ghosts
         super().__init__(*args, **kwargs)
+        self.extra_data["interpolator"] = interpolator
+        self.extra_data["log_rad"] =  log_rad
         signal.signal(signal.SIGINT, self.handler)
 
     def list_files(self, directory: str) -> list[str]:
@@ -140,6 +141,7 @@ class ReducedSurfaceFileHandler(FileHandler):
             shm=shared_memory,
             log_coords=log_coords,
             shape=extra_data["shape"],
+            **extra_data.get("interpolator_kwargs", {}),
         )
         return interpolator
 

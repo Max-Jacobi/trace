@@ -39,8 +39,11 @@ class FileHandler(ABC):
         files_per_step: int | None = None,
         verbose: bool = False,
         out_file: TextIO = sys.stdout,
+        interpolator_kwargs: dict[str, Any] = {},
         ) -> None:
         self.keys = keys
+
+        self.extra_data = {"interpolator_kwargs": interpolator_kwargs}
 
         self.parallel_kwargs = {
             "n_cpu": n_cpu,
