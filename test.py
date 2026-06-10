@@ -1,10 +1,11 @@
 import os
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import multiprocessing as mp
 
-from src.gra_surface import GRASurfaceFileHandler
-from src.interpolators import PchipInterpolator3D, LinearInterpolator3D
+from src.reduced_surface import ReducedSurfaceFileHandler
+from src.interpolators import PchipInterpolator3D, RegularInterpolator3D
 from src.interpolators.coordinate_transformations import CartesianToSpherical
 from src.integrators import ImplicitTrapezoid, ExplicitTrapezoid
 from src.tracers import Tracers
@@ -12,25 +13,25 @@ from src.seeds import spherical_by_volume
 
 def main():
     #mp.set_start_method("spawn")
-    tracer_path = "/scratch2/11245/mjacobi/tracers_edu"
-    data_path = f"{tracer_path}/data/"
+    tracer_path = "/beegfs/ho54hof/simulations/Lam300_1_LR/"
+    data_path = f"{tracer_path}/transformed/"
     
-    start_t = 11500
-    end_t   = 3500
+    start_t = 16080
+    end_t   = 15500
     rmin    = 300
     rmax    = 1000
-    n_r     = 2
-    n_th    = 2
-    n_ph    = 2
+    n_r     = 20
+    n_th    = 10
+    n_ph    = 20
     
-    n_cpu = 8
-    files_per_step = min(15, max(2, n_cpu))
+    n_cpu = int(sys.argv[1])
+    files_per_step = max(2, n_cpu)
     
-    # interpolator = LinearInterpolator3D
-    interpolator = PchipInterpolator3D
+    interpolator = RegularInterpolator3D
+    # interpolator = PchipInterpolator3D
     
     # integrator = ExplicitTrapezoid()
-    integrator = ImplicitTrapezoid(max_iter=5, relax=0.8)
+    integrator = ImplicitTrapezoid(max_iter=3, relax=0.8)
     
     output_dir = f"{tracer_path}/test_"
     output_dir += f"nr{n_r}_nth{n_th}_nph{n_ph}_"
@@ -41,45 +42,32 @@ def main():
     filebase = f"{output_dir}/tracer_"
     
     
-    file_handler = GRASurfaceFileHandler(
+    file_handler = ReducedSurfaceFileHandler(
         interpolator=interpolator,
-        surface_num=2,
         directory=data_path,
         log_rad=True,
         keys=[
-            'tracer.hydro.aux.T',
-            'tracer.hydro.aux.hu_t',
-            'tracer.hydro.aux.s',
-            'tracer.hydro.aux.u_t',
-            'tracer.hydro.prim.rho',
-            'tracer.passive_scalars.r_0',
-            'tracer.hydro.aux.V_u_x',
-            'tracer.hydro.aux.V_u_y',
-            'tracer.hydro.aux.V_u_z',
-            'M1.geom.sc_sqrt_det_g',
-            'M1.rad.J_00',
-            'M1.rad.J_01',
-            'M1.rad.J_02',
-            'M1.rad.n_00',
-            'M1.rad.n_01',
-            'M1.rad.n_02',
-            'M1.rad.st_H_u_t_00',
-            'M1.rad.st_H_u_t_01',
-            'M1.rad.st_H_u_t_02',
-            'M1.rad.st_H_u_x_00',
-            'M1.rad.st_H_u_x_01',
-            'M1.rad.st_H_u_x_02',
-            'M1.rad.st_H_u_y_00',
-            'M1.rad.st_H_u_y_01',
-            'M1.rad.st_H_u_y_02',
-            'M1.rad.st_H_u_z_00',
-            'M1.rad.st_H_u_z_01',
-            'M1.rad.st_H_u_z_02',
+            'V_u_x',
+            'V_u_y',
+            'V_u_z',
+            'T',
+            'hu_t',
+            's',
+            'u_t',
+            'rho',
+            'r_0',
+            'F_nue',
+            'F_nua',
+            'F_nux',
+            'eps_nue',
+            'eps_nua',
+            'eps_nux',
         ],
         n_cpu=n_cpu,
         files_per_step=files_per_step,
         verbose=True,
-        )
+        interpolator_kwargs={"method": "linear"},
+       )
     
     ##
     
@@ -93,9 +81,9 @@ def main():
         integrator=integrator,
         file_handler=file_handler,
         vel_keys=(
-            'tracer.hydro.aux.V_u_x',
-            'tracer.hydro.aux.V_u_y',
-            'tracer.hydro.aux.V_u_z',
+            'V_u_x',
+            'V_u_y',
+            'V_u_z',
         ),
     )
     

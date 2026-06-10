@@ -166,11 +166,13 @@ class GRASurfaceFileHandler(FileHandler):
         phi = extra_data['ph']
         interpolator = extra_data['interpolator']
         log_coords = [0] if extra_data['log_rad'] else []
-        interpolator = CartesianToSpherical(interpolator, r, th, phi,
-                                            shm=shared_memory,
-                                            log_coords=log_coords,
-                                            shape=extra_data['shape']
-                                            )
+        interpolator = CartesianToSpherical(
+            interpolator, r, th, phi,
+            shm=shared_memory,
+            log_coords=log_coords,
+            shape=extra_data['shape']
+            **extra_data.get("interpolator_kwargs", {}),
+        )
         return interpolator
 
 

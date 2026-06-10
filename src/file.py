@@ -39,8 +39,11 @@ class FileHandler(ABC):
         files_per_step: int | None = None,
         verbose: bool = False,
         out_file: TextIO = sys.stdout,
+        interpolator_kwargs: dict[str, Any] = {},
         ) -> None:
         self.keys = keys
+
+        self.extra_data = {"interpolator_kwargs": interpolator_kwargs}
 
         self.parallel_kwargs = {
             "n_cpu": n_cpu,
@@ -247,6 +250,7 @@ class FileHandler(ABC):
             type(self).load_step_to_memory,
             tasks,
             desc=msg,
+            unit="file",
             **self.parallel_kwargs
         )
         self.cur_times = self.times[indices]

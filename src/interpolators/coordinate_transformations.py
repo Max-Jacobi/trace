@@ -12,6 +12,15 @@ class CartesianToSpherical(InterpolatorBase):
     def __init__(self, interpolator: type[InterpolatorBase], *args, **kwargs):
         self.interpolator = interpolator(*args, **kwargs)
 
+    def __del__(self):
+        del self.interpolator
+
+    def load(self):
+        self.interpolator.load()
+
+    def unload(self):
+        self.interpolator.unload()
+
     def __call__(self, coords: np.ndarray) -> np.ndarray:
         x, y, z = coords
         r = np.sqrt(x**2 + y**2 + z**2)

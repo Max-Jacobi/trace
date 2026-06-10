@@ -14,8 +14,9 @@ class PchipInterpolator3D(InterpolatorBase):
     n_ghosts = 3
 
     def __init__(self, *coords: np.ndarray, shm: dict[str, str], shape: tuple[int, int, int], log_coords: list[int] = []):
-        self.log_coords = log_coords
+        super().__init__(shm_names=shm, shape=shape)
 
+        self.log_coords = log_coords
         transformed = []
         for i, c in enumerate(coords):
             c = np.asarray(c)
@@ -30,37 +31,17 @@ class PchipInterpolator3D(InterpolatorBase):
                 transformed.append(c)
         x, y, z = transformed
 
-
-
-        self.keys = list(shm.keys())
-        self.n_keys = len(self.keys)
-
         self.nx = x.shape[0]
         self.ny = y.shape[0]
         self.nz = z.shape[0]
-        self.shape = shape
-        assert shape == (self.nx, self.ny, self.nz)
-
-        dx = np.diff(x)
-        dy = np.diff(y)
-        dz = np.diff(z)
-        self.dx = np.average(dx)
-        self.dy = np.average(dy)
-        self.dz = np.average(dz)
-        assert np.all(np.isclose(self.dx, dx))
-        assert np.all(np.isclose(self.dy, dy))
-        assert np.all(np.isclose(self.dz, dz))
-        self.x0 = float(x[0])
-        self.y0 = float(y[0])
-        self.z0 = float(z[0])
+        assert self.shape == (self.nx, self.ny, self.nz)
 
         self._x_nodes = np.asarray(x)
         self._y_nodes = np.asarray(y)
         self._z_nodes = np.asarray(z)
 
-        self.shm = shm
-
         self._xp_cache: dict[tuple[int, int], PchipInterpolator] = {}
+
 
     @staticmethod
     def cell_index(xq, x0, dx, n):
@@ -78,17 +59,16 @@ class PchipInterpolator3D(InterpolatorBase):
         if interp is None:
             data = np.empty((self.n_keys, self.nx), dtype=np.float64)
             for i_k, key in enumerate(self.keys):
-                shm = SharedMemory(name=self.shm[key])
-                try:
-                    data[i_k] = np.ndarray(shape=self.shape, dtype=np.float64, buffer=shm.buf)[:, jy, kz]
-                finally:
-                    shm.close()
+                data[i_k] = self.data[key][:, jy, kz]
             data = np.transpose(data)
             interp = PchipInterpolator(self._x_nodes, data, axis=0, extrapolate=False)
             self._xp_cache[cache_key] = interp
         return interp
 
     def __call__(self, coords: np.ndarray) -> np.ndarray:
+        if not self.loaded:
+            raise RuntimeError("Interpolator data not loaded; call load() before querying.")
+
         transformed = []
         for i, c in enumerate(coords):
             c = np.asarray(c)
