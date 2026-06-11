@@ -6,6 +6,7 @@ File Module
   Data loading is performed in chunks to limit memory usage while allowing for parallel file loading.
 """
 
+import os
 import sys
 import atexit
 from abc import ABC, abstractmethod
@@ -32,6 +33,7 @@ class FileHandler(ABC):
 
     def __init__(
         self,
+        interpolator: type[InterpolatorBase],
         directory: str,
         keys: list[str],
         n_cpu: int = 1,
@@ -43,7 +45,12 @@ class FileHandler(ABC):
         ) -> None:
         self.keys = keys
 
-        self.extra_data = {"interpolator_kwargs": interpolator_kwargs}
+        self.interpolator_cls = interpolator
+
+        self.extra_data = {
+            "interpolator": interpolator,
+            "interpolator_kwargs": interpolator_kwargs,
+            }
 
         self.parallel_kwargs = {
             "n_cpu": n_cpu,
@@ -61,7 +68,7 @@ class FileHandler(ABC):
             self.n_files_per_step = max(1, files_per_step)
             self.tot_memory = self.n_files_per_step * self.memory_size
         elif max_tot_memory is not None:
-            self.n_files_per_step = max(1, max_tot_memory // self.memory_size)
+            self.n_files_per_step = int(max(1, max_tot_memory // self.memory_size))
             self.tot_memory = self.n_files_per_step * self.memory_size
         else:
             raise ValueError("Either files_per_step or max_tot_memory must be specified.")
@@ -149,8 +156,6 @@ class FileHandler(ABC):
         """
         pass
 
-
-
     def parse_files(self, directory: str) -> None:
         """
         Parse available files in the given directory
@@ -185,10 +190,24 @@ class FileHandler(ABC):
         self.files = np.array([reduce(lambda a, b: {**a, **b}, files[rev_idx == i], {})
                       for i, _ in enumerate(self.times)])
 
+    def get_available_psm(self) -> int:
+        st = os.statvfs("/dev/shm")
+        return st.f_bavail * st.f_frsize
+
     def allocate_memory(self) -> None:
         """
         Allocate shared memory for data storage.
+        First check if the available shared memory is sufficient for the required memory size,
+          then create shared memory blocks for each key and time step.
         """
+
+        available_psm = self.get_available_psm()
+        if self.tot_memory > 0.9*available_psm:
+            raise MemoryError(
+                f"Required total memory for loading data ({self.tot_memory / 1e9:.2f} GB) "
+                f"exceeds 90% of available shared memory ({available_psm / 1e9:.2f} GB)."
+            )
+
         shared_mem = tuple(
             {key: SharedMemory(create=True, size=self.memory_size) for key in self.keys}
             for _ in range(self.n_files_per_step)

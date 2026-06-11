@@ -46,7 +46,6 @@ def _fill_with_ghosts(
         buf[ig, ign] = ar[ig, ign]
         buf[ign, ign] = ar[ign, ign]
 
-
 class GRASurfaceFileHandler(FileHandler):
     """
     FileHandler implementation for GR-Athena++ surface files.

@@ -1,6 +1,4 @@
-import pickle, time
 import numpy as np
-from itertools import repeat
 from tqdm import tqdm
 from typing import Any, Optional
 
@@ -17,7 +15,10 @@ _keys: Optional[tuple[str, ...]] = None
 
 class Tracer:
     """
-      Simple class that holds the history of the position, interpolated data and time for a single tracer.
+    Holds the integration history of a single tracer.
+
+    Storage uses pre-allocated numpy arrays sized to the total number of
+    integration steps, avoiding per-step Python object allocations entirely.
     """
 
     def __init__(
@@ -26,18 +27,21 @@ class Tracer:
         position: np.ndarray,
         time: float,
         keys: list[str],
+        n_steps: int,
         props: dict[str, Any] | None = None,
         ) -> None:
         self.id = id
         self.initial_position = position.copy()
         self.initial_time = time
-        self.positions = []
-        self.times = []
+        self._keys = list(keys)
         self.props = props if props is not None else {}
-        self.data = {k: [] for k in keys}
         self.active = False
         self.done = False
         self.failed = False
+        self._n_steps: int = 0
+        self._positions = np.empty((n_steps, 3), dtype=np.float64)
+        self._times     = np.empty(n_steps,      dtype=np.float64)
+        self._data      = {k: np.empty(n_steps, dtype=np.float64) for k in keys}
 
     def add_step(
        self,
@@ -45,14 +49,27 @@ class Tracer:
        time: float,
        data: dict[str, float],
        ) -> None:
-
-       self.positions.append(position.copy())
-       self.times.append(time)
+       i = self._n_steps
+       self._positions[i] = position
+       self._times[i]     = time
        for k, v in data.items():
-           self.data[k].append(v)
+           self._data[k][i] = v
+       self._n_steps += 1
+
+    @property
+    def positions(self) -> np.ndarray:
+        return self._positions[:self._n_steps]
+
+    @property
+    def times(self) -> np.ndarray:
+        return self._times[:self._n_steps]
+
+    @property
+    def data(self) -> dict[str, np.ndarray]:
+        return {k: self._data[k][:self._n_steps] for k in self._keys}
 
     def output_to_ascii(self, coords: list[str], filebase: str) -> str:
-        keys = list(self.data.keys())
+        keys = self._keys
 
         props = "; ".join((f"{key}={val}" for key, val in self.props.items()))
         legend = "{:>23s}" + "{:>26s}"* (4 + len(keys) - 1)
@@ -63,16 +80,13 @@ class Tracer:
 
         tsort = np.argsort(self.times)
 
-        incmp = False
-        for key, dd in self.data.items():
-            if len(dd) != len(tsort):
-                incmp = True
-        if incmp:
-            return "failed"
+        for key in keys:
+            if len(self._data[key][:self._n_steps]) != len(tsort):
+                return "failed"
 
-        data = [np.array(self.times)[tsort]]
-        data += [np.array(self.positions)[tsort, i] for i in range(len(coords))]
-        data += [np.array(self.data[key])[tsort] for key in keys]
+        data = [self.times[tsort]]
+        data += [self.positions[tsort, i] for i in range(len(coords))]
+        data += [self._data[key][:self._n_steps][tsort] for key in keys]
         data = np.column_stack(data)
 
         np.savetxt(filename, data, header=header, fmt="%25.16e")
@@ -103,10 +117,12 @@ class Tracers:
                 f"Some seed times do not coincide with available file times: {unmatched[:5]}"
             )
 
+        n_steps = len(file_times) - 1  # maximum number of integration steps per tracer
+
         if props is None:
             props = [{} for _ in range(positions.shape[0])]
 
-        self.tracers = np.array([Tracer(id=i, position=pos, time=t, keys=self.file_handler.keys, props=prop)
+        self.tracers = np.array([Tracer(id=i, position=pos, time=t, keys=self.file_handler.keys, n_steps=n_steps, props=prop)
                         for i, (pos, t, prop) in enumerate(zip(positions, times, props))])
 
 
@@ -118,7 +134,7 @@ class Tracers:
         vel_interpolators = self.file_handler.setup_interpolators(self.vel_keys, **kwargs)
         data_interpolators = self.file_handler.setup_interpolators(self.file_handler.keys, **kwargs)
 
-        n_bunches = 5*self.file_handler.parallel_kwargs["n_cpu"]
+        n_bunches = 20*self.file_handler.parallel_kwargs["n_cpu"]
 
         for i, (dt, time) in tqdm(
             enumerate(zip(dts, times)),
@@ -154,20 +170,27 @@ class Tracers:
                     )
                     tr.active = True
 
-            active_tracers = [tr for tr in self.tracers if tr.active]
-            active_idxs = [i for i, tr in enumerate(self.tracers) if tr.active]
+            active_tracers = np.array([tr for tr in self.tracers if tr.active])
 
             if len(active_tracers) == 0:
                 continue
 
-            bunches = np.array_split(active_tracers, n_bunches)
-            bunches = [b for b in bunches if len(b) > 0]
+            if hasattr(vel_interpolators[i], "sort_tracers"):
+                active_tracers = vel_interpolators[i].sort_tracers(active_tracers)
 
-            bunches = do_parallel_star(
-                _integrate_vectorized,
-                zip(bunches, repeat(time)),
+            # Extract only the current positions — O(n_tracers) pickle data,
+            # independent of integration history, eliminating the memory growth.
+            positions = np.array([tr.positions[-1] for tr in active_tracers]).T  # (3, n_active)
+
+            tracer_bunches = [b for b in np.array_split(active_tracers, n_bunches) if len(b) > 0]
+            split_sizes = np.cumsum([len(b) for b in tracer_bunches[:-1]])
+            position_bunches = np.split(positions, split_sizes, axis=1)
+
+            results = do_parallel_star(
+                _integrate_positions,
+                [(j, pos, time) for j, pos in enumerate(position_bunches)],
                 desc=f"  Step {i}",
-                total=len(bunches),
+                total=len(tracer_bunches),
                 initializer=_init_worker,
                 initargs=initargs,
                 position=self.pbar_pos+1,
@@ -177,11 +200,41 @@ class Tracers:
                 **self.file_handler.parallel_kwargs,
             )
 
-            self.tracers[active_idxs] = np.concatenate(bunches)
+            # imap_unordered returns results in arbitrary order; sort by bundle
+            # index so each result aligns with the correct tracer_bunches entry.
+            results.sort(key=lambda r: r[0])
+
+            for (_, new_pos, new_data, valid_mask), tracer_bunch in zip(results, tracer_bunches):
+                for j, tr in enumerate(tracer_bunch):
+                    if not valid_mask[j]:
+                        tr.done = True
+                        tr.active = False
+                    else:
+                        tr.add_step(
+                            position=new_pos[:, j],
+                            time=time + dt,
+                            data=dict(zip(self.file_handler.keys, new_data[:, j])),
+                        )
+            # print free memory after each step
+            with open("/proc/meminfo") as f:
+                meminfo = f.read()
+            mem_free = int(meminfo.split("MemFree:")[1].split()[0])
+            est_int_cache = sum(interp._estimate_cached_memory()
+                                for interp in (*data_interpolators, *vel_interpolators))
+            est_tracer_memory = sum(
+                tr._positions.nbytes + tr._times.nbytes +
+                sum(arr.nbytes for arr in tr._data.values())
+                for tr in self.tracers
+            )
+
+            print()
+            print(f"Free memory: {mem_free/1024**2:.2f} GB")
+            print(f"Estimated interp. cache: {est_int_cache/1024**3:.2e} GB")
+            print(f"Estimated tracer data: {est_tracer_memory/1024**3:.2e} GB")
 
 
-        print(f"{sum(tr.done for tr in self.tracers)} tracers done. "
-              f"{sum(tr.active for tr in self.tracers)} tracers active.")
+            print(f"{sum(tr.done for tr in self.tracers)} tracers done. "
+                  f"{sum(tr.active for tr in self.tracers)} tracers active.")
 
     def integrate(self, start_t: float, end_t: float) -> None:
 
@@ -202,7 +255,6 @@ class Tracers:
             i_end = file_times.searchsorted(t_end, side='left')
             chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step+1)
         print(f"Integrating from t={t_start} to t={t_end} with {len(chunk_indices)} chunks.")
-        print(f"Chunk times: {file_times[chunk_indices]}")
 
         for i_step in chunk_indices:
             self.file_handler.load_chunk(i_step, forward=forward)
@@ -221,8 +273,16 @@ def _init_worker(
     keys: tuple[str, ...],
     ) -> None:
     global _time, _dt, _vel_interpolators, _data_interpolator, _keys, _integrator
+
     _time = time
     _dt = dt
+
+    if _vel_interpolators is not None:
+        for interp in (*_vel_interpolators, _data_interpolator):
+            if hasattr(interp, "_xp_cache"):
+                 interp._xp_cache.clear()
+            interp.unload()
+
     _vel_interpolators = vel_interpolators
     _data_interpolator = data_interpolator
     _keys = keys
@@ -230,37 +290,37 @@ def _init_worker(
     for interp in (*_vel_interpolators, _data_interpolator):
         interp.load()
 
-def _integrate_vectorized(tracers: np.ndarray, time) -> np.ndarray:
+def _integrate_positions(
+    bundle_idx: int,
+    positions: np.ndarray,
+    time: float,
+) -> tuple:
+    """
+    Compute new positions and interpolated data for a bundle of tracers.
+
+    Parameters
+    ----------
+    bundle_idx : int
+        Index of this bundle (used to re-order results from imap_unordered).
+    positions : ndarray, shape (3, n)
+        Current Cartesian positions of the tracers in this bundle.
+    time : float
+        Current integration time.
+
+    Returns
+    -------
+    bundle_idx, new_pos (3, n), new_data (n_keys, n), valid_mask (n,)
+        new_pos / new_data are NaN for tracers that left the domain.
+    """
     global _time, _dt, _vel_interpolators, _data_interpolator, _keys, _integrator
     assert _time is not None and _time == time, "Worker not initialized with correct time"
 
-    positions = np.transpose([tracer.positions[-1] for tracer in tracers])
-
-    new_pos = _integrator(
-            xn=positions,
-            dt=_dt,
-            interps=_vel_interpolators,
-    )
+    n = positions.shape[1]
+    new_pos = _integrator(xn=positions, dt=_dt, interps=_vel_interpolators)
     valid_mask = np.isfinite(new_pos).all(axis=0)
-    for tracer in tracers[~valid_mask]:
-        # tracer has reached domain boundary
-        tracer.done = True
-        tracer.active = False
 
-    valid_pos = new_pos[:, valid_mask]
-    valid_tracers = tracers[valid_mask]
+    new_data = np.full((len(_keys), n), np.nan)
+    if valid_mask.any():
+        new_data[:, valid_mask] = _data_interpolator(new_pos[:, valid_mask])
 
-    new_data = _data_interpolator(valid_pos)
-
-    for tracer, new_x, data in zip(
-            valid_tracers,
-            valid_pos.T,
-            new_data.T
-        ):
-        tracer.add_step(
-            position=new_x,
-            time=time + _dt,
-            data=dict(zip(_keys, data)),
-        )
-
-    return tracers
+    return bundle_idx, new_pos, new_data, valid_mask
