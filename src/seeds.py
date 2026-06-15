@@ -49,8 +49,8 @@ def spherical_by_volume(
     # th_start = np.linspace(theta_min, theta_max, n_th+1)
     # dth = np.diff(th_start)
     # th_start = th_start[:-1] + dth/2
-    costheta_start = np.linspace(np.cos(theta_max), np.cos(theta_min), n_th+1)
-    th_start = np.arccos(costheta_start)
+    costheta_start = np.linspace(np.cos(theta_min), np.cos(theta_max), n_th+1)
+    th_start = np.sort(np.arccos(costheta_start))
     dth = np.diff(th_start)
     th_start = th_start[:-1] + dth/2
 
@@ -117,7 +117,6 @@ def spherical_surface_by_area(
     n_t = len(t_start)
     n_tracers = n_t * n_th * n_ph
 
-    r_start = np.full(n_tracers, r_surf)
 
     dt = np.zeros_like(t_start)
     ddt = np.diff(t_start)
@@ -125,8 +124,8 @@ def spherical_surface_by_area(
     dt[0] = ddt[0]/2
     dt[-1] = ddt[-1]/2
 
-    costheta_start = np.linspace(np.cos(theta_max), np.cos(theta_min), n_th+1)
-    th_start = np.arccos(costheta_start)
+    costheta_start = np.linspace(np.cos(theta_min), np.cos(theta_max), n_th+1)
+    th_start = np.sort(np.arccos(costheta_start))
     dth = np.diff(th_start)
     th_start = th_start[:-1] + dth/2
 
@@ -136,13 +135,16 @@ def spherical_surface_by_area(
 
     t_start, th_start, ph_start = np.meshgrid(t_start, th_start, ph_start, indexing='ij')
     dt, dth, dph = np.meshgrid(dt, dth, dph, indexing='ij')
-    dAdt = r_start**2 * np.sin(th_start) * dth * dph * dt
+    dAdt = r_surf**2 * np.sin(th_start) * dth * dph * dt
 
     if random_shift_in_cell:
         th_start += np.random.uniform(-dth/2, dth/2)
         ph_start += np.random.uniform(-dph/2, dph/2)
 
+    r_start = np.full_like(t_start, r_surf)
+
     r_start = r_start.flatten()
+    t_start = t_start.flatten()
     th_start = th_start.flatten()
     ph_start = ph_start.flatten()
     dAdt = dAdt.flatten()

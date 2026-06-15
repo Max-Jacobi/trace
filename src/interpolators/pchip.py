@@ -13,10 +13,19 @@ from .base import InterpolatorBase
 class PchipInterpolator3D(InterpolatorBase):
     n_ghosts = 3
 
-    def __init__(self, *coords: np.ndarray, shm: dict[str, str], shape: tuple[int, int, int], log_coords: list[int] = []):
+    def __init__(
+        self,
+        *coords: np.ndarray,
+        shm: dict[str, str],
+        shape: tuple[int, int, int],
+        log_coords: list[int] = [],
+        max_cache_size_GB: float = 0.5,
+        ):
         super().__init__(shm_names=shm, shape=shape)
 
         self.log_coords = log_coords
+        self.max_cache_size_bytes = int(max_cache_size_GB * 1024**3)
+
         transformed = []
         for i, c in enumerate(coords):
             c = np.asarray(c)
@@ -36,12 +45,19 @@ class PchipInterpolator3D(InterpolatorBase):
         self.nz = z.shape[0]
         assert self.shape == (self.nx, self.ny, self.nz)
 
+        self.x0 = x[0]
+        self.y0 = y[0]
+        self.z0 = z[0]
+        self.dx = x[1] - x[0]
+        self.dy = y[1] - y[0]
+        self.dz = z[1] - z[0]
+
         self._x_nodes = np.asarray(x)
         self._y_nodes = np.asarray(y)
         self._z_nodes = np.asarray(z)
 
         self._xp_cache: dict[tuple[int, int], PchipInterpolator] = {}
-
+        self.n_evicted = 0
 
     @staticmethod
     def cell_index(xq, x0, dx, n):
@@ -63,6 +79,12 @@ class PchipInterpolator3D(InterpolatorBase):
             data = np.transpose(data)
             interp = PchipInterpolator(self._x_nodes, data, axis=0, extrapolate=False)
             self._xp_cache[cache_key] = interp
+
+            while self._estimate_cached_memory() > self.max_cache_size_bytes:
+                #print("PCHIP cache exceeded max size; evicting oldest entry.")
+                self.n_evicted += 1
+                oldest_key = next(iter(self._xp_cache))
+                del self._xp_cache[oldest_key]
         return interp
 
     def __call__(self, coords: np.ndarray) -> np.ndarray:
@@ -157,3 +179,26 @@ class PchipInterpolator3D(InterpolatorBase):
 
         out = [o.reshape(xi.shape) for o in out]
         return np.asarray(out)
+
+
+    def _estimate_cached_memory(self) -> int:
+        total_bytes = 0
+        for interp in self._xp_cache.values():
+            total_bytes += interp.c.nbytes + interp.x.nbytes
+        return total_bytes
+
+    def sort_tracers(self, tracers: np.ndarray) -> np.ndarray:
+        """
+          Sort tracers by their y and z coordinates to improve cache locality of
+          interpolator access. Specifically, digitise the y and z coordinates
+          into bins corresponding to the yz grid cells, and sort tracers by
+          their (y_bin, z_bin) pairs. This way, tracers that require the same
+          x-interpolator will be grouped together, improving cache hits when
+          evaluating the interpolator for multiple tracers in the same yz cell.
+        """
+        y_coords = np.array([tr.positions[-1][1] for tr in tracers])
+        z_coords = np.array([tr.positions[-1][2] for tr in tracers])
+        y_bins = np.digitize(y_coords, self._y_nodes)
+        z_bins = np.digitize(z_coords, self._z_nodes)
+        sort_indices = np.lexsort((z_bins, y_bins))
+        return tracers[sort_indices]

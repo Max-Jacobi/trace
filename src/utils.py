@@ -130,3 +130,47 @@ def do_parallel_star(
     """
     packed_args = _pack_args(args_list, func)
     return do_parallel(_unpack_args, packed_args, n_cpu, verbose=verbose, **kwargs)
+
+
+def do_parallel_star_pool(
+    pool: Optional[Pool],
+    func: Callable,
+    args_list: Iterable[tuple],
+    verbose: bool = False,
+    chunksize: int = 1,
+    **kwargs
+):
+    """
+    Like do_parallel_star but dispatches onto a pre-created persistent Pool.
+
+    If pool is None (i.e. n_cpu == 1), the tasks are executed serially in the
+    calling process instead, which keeps the single-process debug path working.
+
+    Parameters
+    ----------
+    pool : Pool or None
+        A multiprocessing.Pool created externally. Pass None to run serially.
+    func : callable
+        A function that takes multiple arguments.
+    args_list : list of tuples
+        Same semantics as do_parallel_star.
+    verbose : bool
+        Whether to show a tqdm progress bar.
+    chunksize : int
+        imap_unordered chunksize (ignored for serial path).
+    **kwargs
+        Additional arguments forwarded to tqdm.
+    """
+    packed_args = _pack_args(args_list, func)
+    try:
+        kwargs.setdefault("total", len(packed_args))
+    except TypeError:
+        pass
+    kwargs.setdefault("disable", not verbose)
+    kwargs.setdefault("ncols", 0)
+    kwargs.setdefault("file", stdout)
+
+    if pool is None:
+        return list(tqdm(map(_unpack_args, packed_args), **kwargs))
+
+    return list(tqdm(pool.imap_unordered(_unpack_args, packed_args, chunksize=chunksize), **kwargs))

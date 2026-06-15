@@ -1,10 +1,9 @@
-%load_ext autoreload
-%autoreload 2
-
 import pathlib as pl
 import numpy as np
+from multiprocessing import Pool
 from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize, LogNorm
+from tqdm import tqdm
 
 from src.trajectory import Trajectory
 import tabulatedEOS.unit_system as us
@@ -16,14 +15,29 @@ rhofac = us.GeometricSolar.MassDensityConversion(us.CGS)
 
 ##
 
-path = "test_nr30_nth15_nph30_impl_pch"
+PATH_IN     = "data/test_nr30_nth15_nph30_impl_pch"
+PATH_OUT    = "data/test_surf_nth15_nph30_impl_pch"
+OUTPUT_PATH = "data"
+N_CPU       = 12
+
 prefix = "tracer_"
 
-files = sorted(pl.Path(path).glob(f"{prefix}*.dat"))
+files = []
+#files += sorted(pl.Path(PATH_IN).glob("tracer*"))
+files += sorted(pl.Path(PATH_OUT).glob("tracer*"))
+file_paths = [str(f) for f in files]
 
-trajs = [Trajectory.from_ascii(str(f), shorten_keys=True) for f in files]
+with Pool(N_CPU) as pool:
+    trajs = list(tqdm(
+        pool.imap_unordered(Trajectory.from_ascii, file_paths),
+        total=len(file_paths),
+        ncols=0, unit="tracers", desc="Loading tracers", leave=False,
+    ))
+
 
 print(f"Loaded {len(trajs)} trajectories.")
+trajs = [t for t in trajs if t.data['T'][0] >= 4/Tfac]
+print(f"{len(trajs)} trajectories left after filtering.")
 
 
 for traj in trajs:
@@ -68,7 +82,7 @@ for a, yl in zip(ax.flat, ["r (km)", "phi (deg)", "theta (deg)",
 ax[1, 0].set_yscale("log")
 plt.colorbar(plt.cm.ScalarMappable(norm=theta_norm, cmap=cmap), label="theta (deg)", ax=ax[0, 2])
 plt.gca().set_rasterization_zorder(-1)
-plt.savefig("test_traj.png", dpi=300, bbox_inches="tight")
+plt.savefig(f"{OUTPUT_PATH}/test_traj.png", dpi=300, bbox_inches="tight")
 
 ##
 
@@ -76,18 +90,33 @@ def at_6GK(traj, key):
     T = traj.data["T"] * Tfac
     return np.interp(6, T[::-1], traj.data[key][::-1])
 
-mm = np.array([traj.props['mass'] for traj in trajs])
-ye0 = np.array([at_6GK(traj, 'r_0') for traj in trajs])
+mm = np.abs([traj.props['mass'] for traj in trajs])
+ye6 = np.array([at_6GK(traj, 'r_0') for traj in trajs])
+s6 = np.array([at_6GK(traj, 's') for traj in trajs])
 th = np.array([traj.data['theta'][-1] for traj in trajs])
-t_ej = np.array([traj.data['time'][0] for traj in trajs]) * us.GeometricSolar.TimeConversion(us.CGS)*1000
 T0 = np.array([traj.data['T'][0] for traj in trajs]) * Tfac
-plt.hist(T0, bins=30, weights=mm, histtype="step", label="Ye0");
-# plt.xlabel(r"$Y_e$ at 6 GK")
-plt.xlabel(r"$T_0$ (GK)")
-plt.ylabel(r"$\Delta m$ (M$_\odot$)")
-# plt.savefig("test_traj_T0_hist.png", dpi=300, bbox_inches="tight")
+
+#t_ej = np.array([traj.data['time'][0] for traj in trajs]) * us.GeometricSolar.TimeConversion(us.CGS)*1000
+
+fig, ax = plt.subplots(2, 2, figsize=(13, 10))
+ax = ax.flatten()
+
+ax[0].hist(ye6, bins=30, weights=mm, histtype="step");
+ax[0].set_xlabel(r"$Y_e$ at 6 GK")
+
+ax[1].hist(s6, bins=np.linspace(0, 120, 30), weights=mm, histtype="step");
+ax[1].set_xlabel(r"$s$ at 6 GK ($k_{\rm B}$)")
+
+ax[2].hist(T0, bins=30, weights=mm, histtype="step");
+ax[2].set_xlabel(r"$T_{\rm max}$ (GK)")
+
+ax[3].hist(th, bins=30, weights=mm, histtype="step");
+ax[3].set_xlabel(r"$\theta$ (rad)")
+
+for a in ax:
+    a.set_ylabel(r"$\Delta m$ (M$_\odot$)")
+plt.savefig(f"{OUTPUT_PATH}/test_traj_hists.png", dpi=300, bbox_inches="tight")
 # plt.hist(t_ej, bins=30, weights=mm, histtype="step", label="t_ej")
-# plt.hist(th, bins=30, weights=mm, histtype="step", label="theta")
 
 ##
 
@@ -112,4 +141,4 @@ for ax, direc in zip(axs, 'xyz'):
 plt.colorbar(im, label="Number of tracers", ax=axs)
 axs[0].set_ylabel(r"$|\dot{Y_e}|$ [1/ms]")
 # plt.tight_layout()
-plt.savefig("test_traj_dye.png", dpi=300, bbox_inches="tight")
+plt.savefig(f"{OUTPUT_PATH}/test_traj_dye.png", dpi=300, bbox_inches="tight")

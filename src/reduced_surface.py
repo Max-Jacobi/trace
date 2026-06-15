@@ -36,8 +36,7 @@ class ReducedSurfaceFileHandler(FileHandler):
     ) -> None:
         self.file_pattern = file_pattern
         self.n_ghosts = interpolator.n_ghosts
-        super().__init__(*args, **kwargs)
-        self.extra_data["interpolator"] = interpolator
+        super().__init__(interpolator, *args, **kwargs)
         self.extra_data["log_rad"] =  log_rad
         signal.signal(signal.SIGINT, self.handler)
 

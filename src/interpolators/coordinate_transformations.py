@@ -13,7 +13,40 @@ class CartesianToSpherical(InterpolatorBase):
         self.interpolator = interpolator(*args, **kwargs)
 
     def __del__(self):
-        del self.interpolator
+        # Guard against partially-constructed instances (e.g. during unpickling
+        # with spawn) where __del__ may fire before interpolator is set.
+        if hasattr(self, 'interpolator'):
+            del self.interpolator
+
+    def __getattr__(self, name):
+        # Delegate unknown attribute lookups to the wrapped interpolator.
+        # object.__getattribute__ avoids infinite recursion if self.interpolator
+        # itself is not yet set (e.g. during __init__ or unpickling).
+        try:
+            interp = object.__getattribute__(self, 'interpolator')
+        except AttributeError:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'"
+            )
+        return getattr(interp, name)
+
+    def __getstate__(self):
+        return {'interpolator': self.interpolator}
+
+    def __setstate__(self, state):
+        self.interpolator = state['interpolator']
+
+    def sort_tracers(self, tracers: np.ndarray) -> np.ndarray:
+        """Sort tracers by their spherical (theta, phi) bin for cache locality."""
+        positions = np.array([tr.positions[-1] for tr in tracers]).T  # (3, n)
+        x, y, z = positions
+        r = np.sqrt(x**2 + y**2 + z**2)
+        safe_r = np.where(r > 0, r, 1.0)
+        theta = np.arccos(z / safe_r)
+        phi = (np.arctan2(y, x) + _2pi) % _2pi
+        theta_bins = np.digitize(theta, self.interpolator._y_nodes)
+        phi_bins = np.digitize(phi, self.interpolator._z_nodes)
+        return tracers[np.lexsort((phi_bins, theta_bins))]
 
     def load(self):
         self.interpolator.load()
