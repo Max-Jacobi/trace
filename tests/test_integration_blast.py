@@ -31,8 +31,8 @@ velocity field is radially symmetric.
 
 Schemes compared
 ----------------
-  1. RegularInterpolator3D  (linear spatial)  + ForwardEuler  (1st order)
-  2. PchipInterpolator3D    (cubic spatial)   + ImplicitTrapezoid (2nd order)
+  1. RegularInterpolator3D  (linear spatial)  + ForwardEuler        (1st order)
+  2. PchipInterpolator3D    (cubic spatial)   + ExplicitTrapezoid   (2nd order)
   3. PchipInterpolator3D    (cubic spatial)   + RK4 (4th order, monotone PCHIP time)
 
 Plots
@@ -59,6 +59,7 @@ import pytest
 from multiprocessing.shared_memory import SharedMemory
 
 from src.integrators.base import IntegratorBase
+from src.integrators.expl_trapezoid import ExplicitTrapezoid
 from src.integrators.impl_trapezoid import ImplicitTrapezoid
 from src.integrators.rk4 import RK4
 from src.interpolators.regular import RegularInterpolator3D
@@ -418,9 +419,9 @@ def _M_R(traj_step, masses, n_bins=80, r_max=5.0):
 # ---------------------------------------------------------------------------
 
 SCHEMES = [
-    ("Linear + Euler",       RegularInterpolator3D, _ForwardEuler()),
-    ("PCHIP + Impl.Trap.",   PchipInterpolator3D,   ImplicitTrapezoid()),
-    ("PCHIP + RK4",          PchipInterpolator3D,   RK4(monotone=True)),
+    ("Linear + Euler",      RegularInterpolator3D, _ForwardEuler()),
+    ("PCHIP + Expl.Trap.",  PchipInterpolator3D,   ExplicitTrapezoid()),
+    ("PCHIP + RK4",         PchipInterpolator3D,   RK4(monotone=True)),
 ]
 
 COLORS     = ["tab:blue", "tab:orange", "tab:green"]

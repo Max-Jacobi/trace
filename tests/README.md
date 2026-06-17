@@ -882,3 +882,68 @@ Saved to `tests/plots/` (created automatically):
 | `blast_wave_final_positions.png` | One panel per scheme: tracer scatter at T_END overlaid on density background and analytic shock circle |
 | `blast_wave_M_R.png` | 2x2 panels: M(<r) for all three schemes at 4 evenly spaced timesteps.  The shock ring (high M gradient) moves outward in each panel. |
 | `blast_wave_errors.png` | RMS position error vs time on a log scale for the 225 tracers with xi0 < 0.6 (analytic trajectory valid) |
+
+---
+
+## `test_integration_trapezoid.py`
+
+Exploratory comparison of `ExplicitTrapezoid` vs `ImplicitTrapezoid`.  Both
+schemes use `PchipInterpolator3D` for spatial interpolation and are driven
+through the same blast-wave field as `test_integration_blast.py`.  No failure
+conditions.
+
+### Why compare them?
+
+Both methods are formally 2nd-order accurate in time but have a structural
+difference in how they compute the end-of-step velocity:
+
+| Method | End velocity | Notes |
+|---|---|---|
+| ExplicitTrapezoid | `v(x*, t_{n+1})` where `x* = x_n + dt*v_n` (predictor) | Single corrector; predictor can overshoot the shock |
+| ImplicitTrapezoid | `v(x_{n+1}, t_{n+1})` iterated to convergence (Picard) | Removes predictor error; unconditionally stable |
+
+For smooth flows both achieve similar accuracy.  The implicit method has a
+~2x smaller error constant and is more accurate near the shock, where the
+explicit predictor can overshoot into a region of very different velocity.
+
+### Three analyses
+
+**Analysis 1: Convergence study** (tracers with xi0 < 0.6, analytic solution exact)
+
+| DT | ExplTrap error | ImplTrap error | Ratio |
+|---|---|---|---|
+| 0.10 | 6.2e-5 | 3.1e-5 | ~2x |
+| 0.15 | 1.4e-4 | 7.0e-5 | ~2x |
+| 0.30 | 5.4e-4 | 2.8e-4 | ~2x |
+| 0.75 | 3.1e-3 | 1.7e-3 | ~2x |
+
+Both methods lie on O(dt^2) lines.  The implicit method sits ~2x lower at
+every step size, reflecting its smaller second-order error constant.
+
+**Analysis 2: Disagreement vs xi0 at large DT = 0.5**
+
+|ExplTrap - ImplTrap| at T_END as a function of the tracer's initial xi0:
+
+| Zone | Mean disagreement | Max disagreement |
+|---|---|---|
+| All tracers | 1.0e-3 | 4.5e-3 |
+| Near shock (0.7 < xi0 < 1.3) | 2.2e-3 | 4.0e-3 |
+
+Near-shock tracers show ~3x larger disagreement than the average.  This is
+the predictor-overshoot effect: at DT=0.5 the predictor step is ~0.17 in
+position space, comparable to or larger than the shock width (~0.085), so
+ExplTrap samples the velocity on the wrong side of the shock.
+
+**Analysis 3: Side-by-side final positions at large DT**
+
+Visual comparison of tracer scatter on the density background at T_END=4,
+DT=0.5.  White cross markers show the analytic positions for inside-shock
+tracers, making the additional error in ExplTrap visible.
+
+### Output plots
+
+| File | Content |
+|---|---|
+| `trapezoid_convergence.png` | Log-log error vs DT; both O(dt^2) lines + reference |
+| `trapezoid_disagreement.png` | Left: |ExplTrap-ImplTrap| vs xi0; Right: individual errors vs analytic for xi0<0.6 |
+| `trapezoid_final_positions.png` | Side-by-side scatter at DT=0.5 with analytic markers |
