@@ -223,6 +223,7 @@ class Tracers:
         ):
             # Window of n_snap consecutive snapshots centred on this step.
             shm_vels = [{k: shm_all[i+j][k] for k in self.vel_keys} for j in range(n_snap)]
+            snap_times = times[i:i+n_snap]
             # Data interpolation always at the step-end snapshot (position 1 for
             # 2-snap, position 2 for 4-snap — i.e. i_start_in_window + 1).
             shm_data = shm_all[i + i_start_in_window + 1]  # all keys
@@ -283,7 +284,7 @@ class Tracers:
             position_bunches = np.split(positions, split_sizes, axis=1)
 
             task_args = [
-                (j, pos, time, dt, chunk_id, shm_vels, shm_data)
+                (j, pos, time, dt, chunk_id, shm_vels, shm_data, snap_times)
                 for j, pos in enumerate(position_bunches)
             ]
 
@@ -436,6 +437,7 @@ def _integrate_positions(
     chunk_id: int,
     shm_vels: list[dict],
     shm_data: dict,
+    snap_times: np.ndarray,
 ) -> tuple:
     """
     Compute new positions and interpolated data for a bundle of tracers.
@@ -457,6 +459,8 @@ def _integrate_positions(
         stencil window (length == integrator.n_snapshots).
     shm_data : dict
         Shared-memory name mapping for the data snapshot at t+dt.
+    snap_times : ndarray, shape (n_snapshots,)
+        Actual times corresponding to each entry in shm_vels.
 
     Returns
     -------
@@ -466,7 +470,8 @@ def _integrate_positions(
     _ensure_interps(chunk_id, shm_vels, shm_data)
 
     n = positions.shape[1]
-    new_pos = _integrator(xn=positions, dt=dt, interps=_vel_interps)
+    new_pos = _integrator(xn=positions, dt=dt, interps=_vel_interps,
+                          snap_times=snap_times)
     valid_mask = np.isfinite(new_pos).all(axis=0)
 
     new_data = np.full((len(_data_keys), n), np.nan)

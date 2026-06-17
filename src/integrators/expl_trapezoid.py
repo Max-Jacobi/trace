@@ -19,6 +19,7 @@ class ExplicitTrapezoid(IntegratorBase):
         xn: np.ndarray,
         dt: float,
         interps: tuple[InterpolatorCallable, ...],
+        snap_times: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Perform a single explicit trapezoidal update for one tracer.
@@ -26,6 +27,7 @@ class ExplicitTrapezoid(IntegratorBase):
         xn: array shape (d {,n}) current position(s)
         dt: float
         interps: tuple of two callables (interp_n, interp_n1)
+        snap_times: unused (two-snapshot scheme needs only dt)
 
         Returns:
         - x_new: array shape (d, {n}) new position(s)

@@ -36,6 +36,7 @@ class ImplicitTrapezoid(IntegratorBase):
         xn: np.ndarray,
         dt: float,
         interps: tuple[InterpolatorCallable, ...],
+        snap_times: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Perform a single implicit trapezoid update for one tracer.
@@ -43,6 +44,7 @@ class ImplicitTrapezoid(IntegratorBase):
         xn: array shape (d {,n}) current position(s)
         dt: array shape (1,) time step
         interps: tuple of two callables (interp_n, interp_n1)
+        snap_times: unused (two-snapshot scheme needs only dt)
         tol: relative tolerance for convergence (Euclidean norm)
         max_iter: max Picard iterations before fallback
         relax: relaxation factor in (0,1] applied to Picard updates

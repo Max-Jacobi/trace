@@ -6,52 +6,57 @@ construct a cubic-in-time velocity field at the RK4 midpoint substeps.
 
 Two blending modes are available (selected at construction time):
 
-  monotone=False  — cubic Lagrange interpolation (pre-computed scalar weights).
-                    4th-order accurate in smooth regions; can overshoot at shocks.
+  monotone=False  -- cubic Lagrange interpolation.
+                     4th-order accurate in smooth regions; can overshoot at shocks.
 
-  monotone=True   — PCHIP (Fritsch-Carlson) monotone cubic Hermite interpolation.
-                    Guarantees no new extrema are introduced between snapshots,
-                    at the cost of reducing to 3rd order near non-smooth features.
-                    Recommended for flows with strong shocks (default).
+  monotone=True   -- PCHIP (Fritsch-Carlson) monotone cubic Hermite interpolation.
+                     Guarantees no new extrema are introduced between snapshots,
+                     at the cost of reducing to 3rd order near non-smooth features.
+                     Recommended for flows with strong shocks (default).
+
+Both modes support non-uniform snapshot spacing via the snap_times argument.
 
 The four RK4 substep velocities are:
-    k1  evaluated at t_n          → interps[1]          (exact)
-    k2  evaluated at t_n + dt/2   → blended interpolant  (approx)
-    k3  evaluated at t_n + dt/2   → blended interpolant  (approx, different pos)
-    k4  evaluated at t_{n+1}      → interps[2]          (exact)
+    k1  evaluated at t_n          -> interps[1]          (exact)
+    k2  evaluated at t_n + dt/2   -> blended interpolant  (approx)
+    k3  evaluated at t_n + dt/2   -> blended interpolant  (approx, different pos)
+    k4  evaluated at t_{n+1}      -> interps[2]          (exact)
 
-Lagrange weights for α ∈ [0, 1] on the four-point stencil
-(τ = -1, 0, 1, 2) normalised so that τ=0 → t_n and τ=1 → t_{n+1}:
-    w0(α) = -α(α-1)(α-2)/6
-    w1(α) =  (α+1)(α-1)(α-2)/2
-    w2(α) = -(α+1)α(α-2)/2
-    w3(α) =  (α+1)α(α-1)/6
+Lagrange weights at t_eval for nodes (t0, t1, t2, t3):
+    w_j(t) = prod_{k!=j} (t - t_k) / (t_j - t_k)
 
-PCHIP at α = 0.5 (Hermite basis evaluated at midpoint):
-    h00 = 0.5,  h10 = 0.125,  h01 = 0.5,  h11 = -0.125
-    d1, d2 = Fritsch-Carlson derivative estimates at τ=0 and τ=1
-    v_mid = 0.5·v1 + 0.125·d1 + 0.5·v2 - 0.125·d2
+PCHIP (Fritsch-Carlson 1980) derivative estimates at t1 and t2:
+    h_i = t_{i+1} - t_i,  s_i = (v_{i+1} - v_i) / h_i
+    d_j = (h_{j-1} + h_j) / ((2h_j + h_{j-1})/s_{j-1} + (h_j + 2h_{j-1})/s_j)
+          when s_{j-1} and s_j share the same sign, else 0.
+    Hermite cubic evaluated at alpha = (t_eval - t1) / h1.
 """
 
 import numpy as np
 
 from .base import InterpolatorCallable, IntegratorBase
 
-# ── Lagrange weights at α = 0.5 ───────────────────────────────────────────────
-_α = 0.5
-_W_MID = np.array([
-    -_α * (_α - 1) * (_α - 2) / 6,        # w0:  t_{n-1}
-     (_α + 1) * (_α - 1) * (_α - 2) / 2,  # w1:  t_n
-    -(_α + 1) * _α * (_α - 2) / 2,        # w2:  t_{n+1}
-     (_α + 1) * _α * (_α - 1) / 6,        # w3:  t_{n+2}
-])
 
-# ── PCHIP Hermite basis at α = 0.5 ────────────────────────────────────────────
-# H(0.5) = h00·y1 + h10·d1 + h01·y2 + h11·d2
-_H00 =  0.5    # = 2α³ - 3α² + 1
-_H10 =  0.125  # = α³ - 2α² + α
-_H01 =  0.5    # = -2α³ + 3α²
-_H11 = -0.125  # = α³ - α²
+def _lagrange_weights(snap_times: np.ndarray) -> np.ndarray:
+    """
+    Compute the four Lagrange basis weights at the midpoint of [t1, t2].
+
+    Parameters
+    ----------
+    snap_times : array of shape (4,)
+        Times [t0, t1, t2, t3] of the four snapshots.
+
+    Returns
+    -------
+    w : array of shape (4,)
+    """
+    t0, t1, t2, t3 = snap_times
+    t_eval = 0.5 * (t1 + t2)
+    w0 = ((t_eval-t1)*(t_eval-t2)*(t_eval-t3)) / ((t0-t1)*(t0-t2)*(t0-t3))
+    w1 = ((t_eval-t0)*(t_eval-t2)*(t_eval-t3)) / ((t1-t0)*(t1-t2)*(t1-t3))
+    w2 = ((t_eval-t0)*(t_eval-t1)*(t_eval-t3)) / ((t2-t0)*(t2-t1)*(t2-t3))
+    w3 = ((t_eval-t0)*(t_eval-t1)*(t_eval-t2)) / ((t3-t0)*(t3-t1)*(t3-t2))
+    return np.array([w0, w1, w2, w3])
 
 
 def _pchip_v_mid(
@@ -59,40 +64,62 @@ def _pchip_v_mid(
     v1: np.ndarray,
     v2: np.ndarray,
     v3: np.ndarray,
+    snap_times: np.ndarray,
 ) -> np.ndarray:
     """
-    PCHIP (Fritsch-Carlson) monotone cubic Hermite blend at α = 0.5.
-
-    Assumes uniform spacing (Δτ = 1) between the four snapshots.
-    Operates element-wise on arrays of arbitrary shape.
+    PCHIP (Fritsch-Carlson) monotone cubic Hermite blend at the midpoint of
+    [t1, t2], supporting non-uniform snapshot spacing.
 
     Parameters
     ----------
     v0, v1, v2, v3 : ndarray
-        Velocity values at τ = -1, 0, 1, 2 (i.e. t_{n-1} … t_{n+2}).
+        Velocity arrays at t0, t1, t2, t3.
+    snap_times : array of shape (4,)
+        Times [t0, t1, t2, t3].
 
     Returns
     -------
     ndarray
-        Interpolated velocity at τ = 0.5 (midpoint of [t_n, t_{n+1}]).
+        Interpolated velocity at t_eval = (t1 + t2) / 2.
     """
-    # Secant slopes over each unit interval.
-    s0 = v1 - v0
-    s1 = v2 - v1
-    s2 = v3 - v2
+    t0, t1, t2, t3 = snap_times
+    h0 = t1 - t0
+    h1 = t2 - t1
+    h2 = t3 - t2
 
-    # Fritsch-Carlson derivative estimate: harmonic mean of adjacent secants
-    # when they share the same sign; zero (flat) otherwise to preserve monotonicity.
-    def _fc_deriv(sa: np.ndarray, sb: np.ndarray) -> np.ndarray:
-        denom = sa + sb
-        # Avoid division by zero; where denom==0 the result is 0 anyway.
-        safe = np.where(denom == 0, 1.0, denom)
-        return np.where(sa * sb > 0, 2.0 * sa * sb / safe, 0.0)
+    # Secant slopes (velocity derivative approximations over each interval).
+    s0 = (v1 - v0) / h0
+    s1 = (v2 - v1) / h1
+    s2 = (v3 - v2) / h2
 
-    d1 = _fc_deriv(s0, s1)  # derivative at t_n
-    d2 = _fc_deriv(s1, s2)  # derivative at t_{n+1}
+    # Fritsch-Carlson derivative estimates (eq. 2.9 in Fritsch & Carlson 1980).
+    # At t1: uses left interval h0 and right interval h1.
+    # At t2: uses left interval h1 and right interval h2.
+    def _fc_deriv(sa: np.ndarray, sb: np.ndarray,
+                  ha: float, hb: float) -> np.ndarray:
+        """
+        Derivative estimate at the shared node between intervals ha (left, slope sa)
+        and hb (right, slope sb).  Returns 0 wherever sa and sb differ in sign.
+        Uses safe division to avoid warnings when a slope is exactly zero.
+        """
+        same_sign = sa * sb > 0
+        safe_sa = np.where(same_sign, sa, 1.0)
+        safe_sb = np.where(same_sign, sb, 1.0)
+        denom = (2*hb + ha) / safe_sa + (hb + 2*ha) / safe_sb
+        return np.where(same_sign, (ha + hb) / denom, 0.0)
 
-    return _H00 * v1 + _H10 * d1 + _H01 * v2 + _H11 * d2
+    d1 = _fc_deriv(s0, s1, h0, h1)  # derivative at t1
+    d2 = _fc_deriv(s1, s2, h1, h2)  # derivative at t2
+
+    # Cubic Hermite basis functions at alpha = 0.5 (midpoint of [t1, t2]).
+    # Derivative terms are scaled by h1 because d1, d2 are physical derivatives.
+    alpha = 0.5
+    h00 =  2*alpha**3 - 3*alpha**2 + 1   # = 0.5
+    h10 =    alpha**3 - 2*alpha**2 + alpha  # = 0.125  (scale by h1)
+    h01 = -2*alpha**3 + 3*alpha**2          # = 0.5
+    h11 =    alpha**3 -   alpha**2          # = -0.125 (scale by h1)
+
+    return h00*v1 + h10*h1*d1 + h01*v2 + h11*h1*d2
 
 
 class RK4(IntegratorBase):
@@ -108,10 +135,10 @@ class RK4(IntegratorBase):
         If False, use cubic Lagrange interpolation (4th-order in smooth flows).
 
     Requires four velocity snapshots per step:
-        interps[0] → t_{n-1}
-        interps[1] → t_n       (step start)
-        interps[2] → t_{n+1}   (step end)
-        interps[3] → t_{n+2}
+        interps[0] -> t_{n-1}
+        interps[1] -> t_n       (step start)
+        interps[2] -> t_{n+1}   (step end)
+        interps[3] -> t_{n+2}
     """
 
     n_snapshots: int = 4
@@ -124,6 +151,7 @@ class RK4(IntegratorBase):
         xn: np.ndarray,
         dt: float,
         interps: tuple[InterpolatorCallable, ...],
+        snap_times: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Perform a single RK4 step.
@@ -136,26 +164,31 @@ class RK4(IntegratorBase):
             Integration timestep (from t_n to t_{n+1}).
         interps : tuple of 4 callables
             Velocity interpolators at t_{n-1}, t_n, t_{n+1}, t_{n+2}.
+        snap_times : array of shape (4,), optional
+            Actual times [t_{n-1}, t_n, t_{n+1}, t_{n+2}].  If None, uniform
+            spacing is assumed (all intervals equal to dt).
 
         Returns
         -------
         x_new : ndarray, shape (d {,n})
         """
+        if snap_times is None:
+            st = np.array([-dt, 0.0, dt, 2*dt])
+        else:
+            st = snap_times
+
         if self.monotone:
             def v_mid(x: np.ndarray) -> np.ndarray:
-                """PCHIP monotone cubic velocity at t_n + dt/2."""
                 return _pchip_v_mid(
-                    interps[0](x), interps[1](x), interps[2](x), interps[3](x)
+                    interps[0](x), interps[1](x), interps[2](x), interps[3](x),
+                    st,
                 )
         else:
-            w0, w1, w2, w3 = _W_MID
+            w = _lagrange_weights(st)
 
             def v_mid(x: np.ndarray) -> np.ndarray:
-                """Lagrange cubic velocity at t_n + dt/2."""
-                return (w0 * interps[0](x)
-                      + w1 * interps[1](x)
-                      + w2 * interps[2](x)
-                      + w3 * interps[3](x))
+                return (w[0]*interps[0](x) + w[1]*interps[1](x)
+                      + w[2]*interps[2](x) + w[3]*interps[3](x))
 
         k1 = interps[1](xn)
         k2 = v_mid(xn + 0.5 * dt * k1)

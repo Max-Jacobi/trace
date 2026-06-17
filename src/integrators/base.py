@@ -22,12 +22,17 @@ class IntegratorBase(ABC):
         xn: np.ndarray,
         dt: float,
         interps: tuple[InterpolatorCallable, ...],
+        snap_times: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Perform a single time step update.
         Args:
             xn: array shape (d {,n}) current position(s)
-            dt: float,
+            dt: float, timestep from t_n to t_{n+1}
             interps: tuple of interpolator callables, length == n_snapshots
+            snap_times: 1-D array of the actual times for each snapshot in
+                interps (length == n_snapshots).  Used by higher-order schemes
+                for non-uniform time spacing.  May be None for 2-snapshot
+                schemes where only dt is needed.
         """
         pass
