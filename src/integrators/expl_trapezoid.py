@@ -18,7 +18,7 @@ class ExplicitTrapezoid(IntegratorBase):
         self,
         xn: np.ndarray,
         dt: float,
-        interps: tuple[InterpolatorCallable, InterpolatorCallable],
+        interps: tuple[InterpolatorCallable, ...],
     ) -> np.ndarray:
         """
         Perform a single explicit trapezoidal update for one tracer.

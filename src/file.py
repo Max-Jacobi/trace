@@ -295,10 +295,20 @@ class FileHandler(ABC):
         start_t: float,
         end_t: float,
         overlap: bool = True,
+        n_snap: int = 2,
     ) -> tuple[np.ndarray, bool, float, float]:
         file_times = self.times
         n_files_per_step = self.n_files_per_step
         forward = end_t > start_t
+        # Each chunk of n_files_per_step snapshots yields
+        # n_files_per_step - n_snap + 1 integration steps, so consecutive
+        # chunks must overlap by n_snap - 1 snapshots.
+        stride = n_files_per_step - (n_snap - 1)
+        if stride < 1:
+            raise ValueError(
+                f"n_files_per_step ({n_files_per_step}) must be at least n_snap "
+                f"({n_snap}) to perform any integration steps per chunk."
+            )
 
         if forward:
             t_start = np.min(file_times[file_times >= start_t])
@@ -306,7 +316,7 @@ class FileHandler(ABC):
             i_start = file_times.searchsorted(t_start, side='left')
             i_end = file_times.searchsorted(t_end, side='left')
             if overlap:
-                chunk_indices = np.arange(i_start, i_end+1, n_files_per_step-1)
+                chunk_indices = np.arange(i_start, i_end+1, stride)
             else:
                 chunk_indices = np.arange(i_start, i_end+1, n_files_per_step)
         else:
@@ -315,7 +325,7 @@ class FileHandler(ABC):
             i_start = file_times.searchsorted(t_start, side='left')
             i_end = file_times.searchsorted(t_end, side='left')
             if overlap:
-                chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step+1)
+                chunk_indices = np.arange(i_start, i_end-1, -stride)
             else:
                 chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step)
         return chunk_indices, forward, t_start, t_end

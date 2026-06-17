@@ -20,13 +20,11 @@ _vel_keys:         Optional[tuple[str, ...]]  = None
 _data_keys:        Optional[tuple[str, ...]]  = None
 
 # Per-step interpolator state (updated lazily):
-_chunk_id:        Optional[int]               = None
-_vel_interp_0:    Optional[InterpolatorCallable] = None  # loaded for t
-_vel_interp_1:    Optional[InterpolatorCallable] = None  # loaded for t+dt
-_data_interp:     Optional[InterpolatorCallable] = None  # loaded for t+dt
-_shm_names_vel_0: Optional[dict]              = None
-_shm_names_vel_1: Optional[dict]              = None
-_shm_names_data:  Optional[dict]              = None
+_chunk_id:        Optional[int]                    = None
+_vel_interps:     list[InterpolatorCallable]        = []   # one per snapshot in window
+_data_interp:     Optional[InterpolatorCallable]   = None
+_shm_names_vel:   list[dict]                       = []   # parallel to _vel_interps
+_shm_names_data:  Optional[dict]                   = None
 
 class Tracer:
     """
@@ -184,6 +182,11 @@ class Tracers:
         shm_all = self.file_handler.shared_memory[:len(times)]
         extra_data = self.file_handler.extra_data
 
+        n_snap = self.integrator.n_snapshots
+        # Within a chunk of N snapshots we can complete N - n_snap integration
+        # steps (each step consumes a contiguous window of n_snap snapshots).
+        n_steps_in_chunk = len(times) - n_snap + 1
+
         self._chunk_id += 1
         chunk_id = self._chunk_id
 
@@ -198,18 +201,31 @@ class Tracers:
 
         pbar_kwargs = {k: v for k, v in self.file_handler.parallel_kwargs.items() if k != "n_cpu"}
         pbar_kwargs["disable"] = not pbar_kwargs.pop('verbose', False)
+
+        # The "step start" snapshot is always at index i_start = n_snap//2 - 1
+        # for centred stencils, but for a forward-biased stencil (RK4: indices
+        # [n-1, n, n+1, n+2]) the step start is at window position 1.
+        # We derive it from the integrator contract: interps[1] is t_n for RK4,
+        # interps[0] is t_n for 2-snapshot schemes.
+        # Generalise: step start snapshot index within window = n_snap // 2 - 1
+        # for n_snap=2: 0; for n_snap=4: 1.  This matches both schemes.
+        i_start_in_window = n_snap // 2 - 1  # 0 for 2-snap, 1 for 4-snap
+
         for i, (dt, time) in tqdm(
-            enumerate(zip(dts, times)),
+            enumerate(zip(dts[i_start_in_window:i_start_in_window + n_steps_in_chunk],
+                          times[i_start_in_window:i_start_in_window + n_steps_in_chunk])),
             desc="Integrating tracers",
-            total=len(dts),
+            total=n_steps_in_chunk,
             position=self.pbar_pos,
             unit="time step",
             ncols=0,
             **pbar_kwargs,
         ):
-            shm_vel_0 = {k: shm_all[i][k]   for k in self.vel_keys}
-            shm_vel_1 = {k: shm_all[i+1][k] for k in self.vel_keys}
-            shm_data  = shm_all[i+1]  # all keys, for data interpolation
+            # Window of n_snap consecutive snapshots centred on this step.
+            shm_vels = [{k: shm_all[i+j][k] for k in self.vel_keys} for j in range(n_snap)]
+            # Data interpolation always at the step-end snapshot (position 1 for
+            # 2-snap, position 2 for 4-snap — i.e. i_start_in_window + 1).
+            shm_data = shm_all[i + i_start_in_window + 1]  # all keys
 
             new_tracers = np.array([tr for tr in self.tracers
                                     if len(tr.positions) == 0 and np.isclose(tr.initial_time, time)])
@@ -217,7 +233,7 @@ class Tracers:
             if len(new_tracers) > 0:
                 n_init_bunches = max(1, min(n_bunches, len(new_tracers)))
                 init_pos  = np.array([tr.initial_position for tr in new_tracers]).T  # (3, n_new)
-                shm_init  = {k: shm_all[i][k] for k in self.file_handler.keys}
+                shm_init  = {k: shm_all[i + i_start_in_window][k] for k in self.file_handler.keys}
 
                 init_bunches = [b for b in np.array_split(new_tracers, n_init_bunches) if len(b) > 0]
                 pos_splits   = np.cumsum([len(b) for b in init_bunches[:-1]])
@@ -267,7 +283,7 @@ class Tracers:
             position_bunches = np.split(positions, split_sizes, axis=1)
 
             task_args = [
-                (j, pos, time, dt, chunk_id, shm_vel_0, shm_vel_1, shm_data)
+                (j, pos, time, dt, chunk_id, shm_vels, shm_data)
                 for j, pos in enumerate(position_bunches)
             ]
 
@@ -304,7 +320,10 @@ class Tracers:
               f"{sum(tr.active for tr in self.tracers)} tracers active.")
 
     def integrate(self, start_t: float, end_t: float) -> None:
-        chunk_indices, forward, t_start, t_end = self.file_handler.get_chunk_indices(start_t, end_t)
+        n_snap = self.integrator.n_snapshots
+        chunk_indices, forward, t_start, t_end = self.file_handler.get_chunk_indices(
+            start_t, end_t, n_snap=n_snap
+        )
 
         print(f"Integrating from t={t_start} to t={t_end} with {len(chunk_indices)} chunks.")
 
@@ -330,8 +349,8 @@ def _init_worker_persistent(
     _ensure_interps the first time a task arrives.
     """
     global _integrator, _setup_interp_fn, _extra_data, _vel_keys, _data_keys
-    global _chunk_id, _vel_interp_0, _vel_interp_1, _data_interp
-    global _shm_names_vel_0, _shm_names_vel_1, _shm_names_data
+    global _chunk_id, _vel_interps, _data_interp
+    global _shm_names_vel, _shm_names_data
 
     _integrator       = integrator
     _setup_interp_fn  = setup_interp_fn
@@ -340,74 +359,72 @@ def _init_worker_persistent(
     _data_keys        = data_keys
 
     # Interpolator state starts empty; populated on first task.
-    _chunk_id        = None
-    _vel_interp_0    = None
-    _vel_interp_1    = None
-    _data_interp     = None
-    _shm_names_vel_0 = None
-    _shm_names_vel_1 = None
-    _shm_names_data  = None
+    _chunk_id      = None
+    _vel_interps   = []
+    _data_interp   = None
+    _shm_names_vel = []
+    _shm_names_data = None
 
 
 def _ensure_interps(
     chunk_id: int,
-    shm_vel_0: dict,
-    shm_vel_1: dict,
+    shm_vels: list[dict],
     shm_data: dict,
 ) -> None:
     """
     Lazily (re-)load worker interpolators to match the current step.
 
     Three cases:
-      1. chunk_id changed — full reinit: old shared-memory slot names are reused
-         with new data between chunks, so _xp_cache entries are stale.
-      2. shm_vel_0 changed but chunk is same — step transition within chunk:
-         roll vel_1 → vel_0 (preserving its valid _xp_cache), then load new
-         vel_1 and data_interp.
+      1. chunk_id changed — full reinit: all interpolators are rebuilt from
+         scratch because shared-memory slot names are reused with new data
+         between chunks, making any cached state stale.
+      2. shm_vels[0] changed but chunk is same — step transition within chunk:
+         the window shifts by one: drop the oldest interpolator (unload it),
+         roll the rest forward (preserving their valid caches), then load only
+         the new trailing snapshot and the new data interpolator.
       3. Same chunk, same step — nothing to do.
     """
-    global _chunk_id, _vel_interp_0, _vel_interp_1, _data_interp
-    global _shm_names_vel_0, _shm_names_vel_1, _shm_names_data
+    global _chunk_id, _vel_interps, _data_interp
+    global _shm_names_vel, _shm_names_data
 
     if chunk_id != _chunk_id:
         # ── Full reinit ──────────────────────────────────────────────────────
-        if _vel_interp_0 is not None:
-            _vel_interp_0.unload()
-        if _vel_interp_1 is not None:
-            _vel_interp_1.unload()
+        for interp in _vel_interps:
+            interp.unload()
         if _data_interp is not None:
             _data_interp.unload()
 
-        _vel_interp_0 = _setup_interp_fn(shm_vel_0, _extra_data)
-        _vel_interp_1 = _setup_interp_fn(shm_vel_1, _extra_data)
-        _data_interp  = _setup_interp_fn(shm_data,  _extra_data)
+        _vel_interps = []
+        for shm in shm_vels:
+            interp = _setup_interp_fn(shm, _extra_data)
+            interp.load()
+            _vel_interps.append(interp)
 
-        _vel_interp_0.load()
-        _vel_interp_1.load()
+        _data_interp = _setup_interp_fn(shm_data, _extra_data)
         _data_interp.load()
 
-        _chunk_id        = chunk_id
-        _shm_names_vel_0 = shm_vel_0
-        _shm_names_vel_1 = shm_vel_1
-        _shm_names_data  = shm_data
+        _chunk_id       = chunk_id
+        _shm_names_vel  = list(shm_vels)
+        _shm_names_data = shm_data
 
-    elif shm_vel_0 != _shm_names_vel_0:
+    elif shm_vels[0] != _shm_names_vel[0]:
         # ── Step transition within chunk ─────────────────────────────────────
-        # vel_interp_1 from previous step now plays the role of vel_interp_0.
-        # Its _xp_cache entries are valid because the underlying shm slot still
-        # holds the same data.
-        _vel_interp_0.unload()
-        _vel_interp_0 = _vel_interp_1   # roll: preserves _xp_cache
-        _vel_interp_1 = _setup_interp_fn(shm_vel_1, _extra_data)
-        _vel_interp_1.load()
+        # The window advances by one snapshot.  Roll existing interpolators
+        # forward (preserving their caches), unload only the one that falls
+        # off the leading edge, then load the new trailing snapshot.
+        _vel_interps[0].unload()
+        _vel_interps = _vel_interps[1:]
+
+        new_interp = _setup_interp_fn(shm_vels[-1], _extra_data)
+        new_interp.load()
+        _vel_interps.append(new_interp)
 
         _data_interp.unload()
         _data_interp = _setup_interp_fn(shm_data, _extra_data)
         _data_interp.load()
 
-        _shm_names_vel_0 = shm_vel_0
-        _shm_names_vel_1 = shm_vel_1
-        _shm_names_data  = shm_data
+        _shm_names_vel  = list(shm_vels)
+        _shm_names_data = shm_data
     # else: same chunk, same step — all interpolators already current.
 
 
@@ -417,8 +434,7 @@ def _integrate_positions(
     time: float,
     dt: float,
     chunk_id: int,
-    shm_vel_0: dict,
-    shm_vel_1: dict,
+    shm_vels: list[dict],
     shm_data: dict,
 ) -> tuple:
     """
@@ -436,19 +452,21 @@ def _integrate_positions(
         Integration timestep.
     chunk_id : int
         Monotonically incrementing counter identifying the current data chunk.
-    shm_vel_0, shm_vel_1, shm_data : dict
-        Shared-memory name mappings for the two velocity snapshots and the
-        data snapshot at t+dt.
+    shm_vels : list[dict]
+        Shared-memory name mappings for the velocity snapshots in this step's
+        stencil window (length == integrator.n_snapshots).
+    shm_data : dict
+        Shared-memory name mapping for the data snapshot at t+dt.
 
     Returns
     -------
     bundle_idx, new_pos (3, n), new_data (n_keys, n), valid_mask (n,)
         new_pos / new_data are NaN for tracers that left the domain.
     """
-    _ensure_interps(chunk_id, shm_vel_0, shm_vel_1, shm_data)
+    _ensure_interps(chunk_id, shm_vels, shm_data)
 
     n = positions.shape[1]
-    new_pos = _integrator(xn=positions, dt=dt, interps=[_vel_interp_0, _vel_interp_1])
+    new_pos = _integrator(xn=positions, dt=dt, interps=_vel_interps)
     valid_mask = np.isfinite(new_pos).all(axis=0)
 
     new_data = np.full((len(_data_keys), n), np.nan)
