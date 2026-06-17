@@ -68,6 +68,7 @@ from tests.test_integration_blast import (
     T_START, T_END, ALPHA, X_C, Y_C,
     PLOT_DIR,
     _density_bg, _shock_circle, _init_tracers, _SnapInterp,
+    _animate_tracers,
 )
 
 
@@ -337,3 +338,25 @@ class TestTrapezoidComparison:
             print(f"      Near-shock (0.7<xi0<1.3): mean {near_diff.mean():.3e},  "
                   f"max {near_diff.max():.3e}")
         print()
+
+        # ================================================================
+        # Animation: 2-panel ExplTrap vs ImplTrap at DT=0.15
+        # ================================================================
+        DT_ANIM = 0.15
+        times_anim, n_anim, _ = _make_times(DT_ANIM)
+        t_levels_anim = times_anim[1 : n_anim + 2]
+
+        traj_expl_a = _run(expl, x0, y0, times_anim)
+        traj_impl_a = _run(impl, x0, y0, times_anim)
+
+        print("  Building trapezoid animation ...", flush=True)
+        anim_path = os.path.join(PLOT_DIR, "trapezoid_animation.mp4")
+        _animate_tracers(
+            scheme_names=["ExplicitTrapezoid", "ImplicitTrapezoid"],
+            trajs=[traj_expl_a, traj_impl_a],
+            t_levels=t_levels_anim,
+            x0=x0,
+            y0=y0,
+            inside=(xi0 < 0.6),
+            output_path=anim_path,
+        )

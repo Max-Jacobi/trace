@@ -4,9 +4,10 @@ All tests live in `tests/` and are run with [pytest](https://docs.pytest.org).
 
 ```bash
 # Run the full fast suite (93 tests, < 1 second)
-python -m pytest tests/ -v --ignore=tests/test_integration_blast.py
+python -m pytest tests/ -v --ignore=tests/test_integration_blast.py \
+                             --ignore=tests/test_integration_trapezoid.py
 
-# Run all tests including the exploratory blast-wave test (~40 s)
+# Run all tests including the exploratory blast-wave and trapezoid tests (~3 min)
 python -m pytest tests/ -v
 
 # Run a single file
@@ -14,7 +15,8 @@ python -m pytest tests/test_integrators.py -v
 python -m pytest tests/test_interpolators.py -v
 python -m pytest tests/test_seeds.py -v
 python -m pytest tests/test_seeds_surface.py -v
-python -m pytest tests/test_integration_blast.py -v -s   # prints progress + error table
+python -m pytest tests/test_integration_blast.py -v -s      # prints progress + error table; saves 3 plots + animation (~40 s)
+python -m pytest tests/test_integration_trapezoid.py -v -s  # prints convergence table; saves 3 plots + animation (~2 min)
 
 # Run a single class or test
 python -m pytest tests/test_integrators.py::TestRK4 -v
@@ -31,7 +33,8 @@ shared memory is created and cleaned up within each test.  The fast suite
 | `test_interpolators.py` | 27 | < 1 s | RegularInterpolator3D, PchipInterpolator3D, CartesianToSpherical |
 | `test_seeds.py` | 25 | < 1 s | `_gauss_legendre_3d/surface` helpers, `spherical_by_volume` |
 | `test_seeds_surface.py` | 12 | < 1 s | `spherical_surface_by_area` |
-| `test_integration_blast.py` | 1 | ~40 s | End-to-end blast-wave integration; saves plots to `tests/plots/` |
+| `test_integration_blast.py` | 1 | ~40 s | End-to-end blast-wave integration; saves 3 plots + MP4 animation to `tests/plots/` |
+| `test_integration_trapezoid.py` | 1 | ~2 min | ExplTrap vs ImplTrap comparison; saves 3 plots + MP4 animation to `tests/plots/` |
 
 ---
 
@@ -882,6 +885,7 @@ Saved to `tests/plots/` (created automatically):
 | `blast_wave_final_positions.png` | One panel per scheme: tracer scatter at T_END overlaid on density background and analytic shock circle |
 | `blast_wave_M_R.png` | 2x2 panels: M(<r) for all three schemes at 4 evenly spaced timesteps.  The shock ring (high M gradient) moves outward in each panel. |
 | `blast_wave_errors.png` | RMS position error vs time on a log scale for the 225 tracers with xi0 < 0.6 (analytic trajectory valid) |
+| `blast_wave_animation.mp4` | 3-panel animation (one per scheme) showing density background (Greys), outside-shock tracers (grey dots), inside-shock tracers coloured by log10 position error vs analytic (hot_r colourmap), and the analytic shock circle (white dashed).  Shared log-scale error colourbar. |
 
 ---
 
@@ -940,10 +944,11 @@ Visual comparison of tracer scatter on the density background at T_END=4,
 DT=0.5.  White cross markers show the analytic positions for inside-shock
 tracers, making the additional error in ExplTrap visible.
 
-### Output plots
+### Output plots and animations
 
 | File | Content |
 |---|---|
 | `trapezoid_convergence.png` | Log-log error vs DT; both O(dt^2) lines + reference |
 | `trapezoid_disagreement.png` | Left: |ExplTrap-ImplTrap| vs xi0; Right: individual errors vs analytic for xi0<0.6 |
 | `trapezoid_final_positions.png` | Side-by-side scatter at DT=0.5 with analytic markers |
+| `trapezoid_animation.mp4` | 2-panel animation at DT=0.15 (20 steps): density background (Greys), outside-shock tracers (grey), inside-shock tracers coloured by log10 position error (hot_r), analytic shock circle (white dashed).  Shared log-scale colourbar highlights where each method accumulates more error. |

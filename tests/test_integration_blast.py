@@ -65,6 +65,9 @@ from src.integrators.rk4 import RK4
 from src.interpolators.regular import RegularInterpolator3D
 from src.interpolators.pchip import PchipInterpolator3D
 
+import matplotlib.animation as _mpl_animation
+from matplotlib.colors import LogNorm
+
 
 # ---------------------------------------------------------------------------
 # Output directory
@@ -415,6 +418,192 @@ def _M_R(traj_step, masses, n_bins=80, r_max=5.0):
 
 
 # ---------------------------------------------------------------------------
+# Animation helper
+# ---------------------------------------------------------------------------
+
+def _animate_tracers(
+    scheme_names: list,
+    trajs: list,
+    t_levels: np.ndarray,
+    x0: np.ndarray,
+    y0: np.ndarray,
+    inside: np.ndarray,
+    output_path: str,
+    fps: int = 4,
+):
+    """
+    Save an animation comparing one or more integration schemes.
+
+    Each panel shows the same blast-wave domain at the current time:
+    - Density field (Greys colourmap) as background; updated every frame.
+    - Outside-shock tracers (xi0 >= 0.6): small grey dots, fixed alpha.
+    - Inside-shock tracers (xi0 < 0.6): scatter coloured by their position
+      error relative to the analytic trajectory, using a shared log-scale
+      colourbar (hot_r: white = small error, dark = large error).
+    - Analytic shock circle (white dashed).
+
+    Parameters
+    ----------
+    scheme_names : list of str
+        Panel labels, one per scheme.
+    trajs : list of ndarray, shape (n_frames, 3, n_tr)
+        Trajectory arrays produced by _run_scheme or _run.
+    t_levels : ndarray, shape (n_frames,)
+        Time at each stored frame.
+    x0, y0 : ndarray, shape (n_tr,)
+        Initial tracer positions at t_levels[0].
+    inside : boolean ndarray, shape (n_tr,)
+        True for tracers whose analytic trajectory is valid.
+    output_path : str
+        Destination MP4 path.
+    fps : int
+        Frames per second of the output video.
+    """
+    n_panels = len(scheme_names)
+    n_frames = len(t_levels)
+    outside = ~inside
+    x_in, y_in = x0[inside], y0[inside]
+
+    # ------------------------------------------------------------------
+    # Pre-compute per-frame per-tracer errors for inside-shock tracers.
+    # errors[panel][frame] -> ndarray shape (n_inside,), floored at 1e-15
+    # ------------------------------------------------------------------
+    all_errors = []
+    for traj in trajs:
+        panel_errors = []
+        for si, t in enumerate(t_levels):
+            x_ex, y_ex = exact_position(x_in, y_in, t)
+            xn = traj[si, 0, inside]
+            yn = traj[si, 1, inside]
+            err = np.sqrt((xn - x_ex) ** 2 + (yn - y_ex) ** 2)
+            err = np.where(err < 1e-15, 1e-15, err)
+            panel_errors.append(err)
+        all_errors.append(panel_errors)
+
+    # Shared log-scale colormap bounds (ignore frame 0 where errors are ~0).
+    flat = np.concatenate([e for pe in all_errors for e in pe[1:]])
+    flat = flat[np.isfinite(flat) & (flat > 0)]
+    vmin_err = float(np.nanpercentile(flat, 2))
+    vmax_err = float(np.nanpercentile(flat, 99))
+    norm = LogNorm(vmin=max(vmin_err, 1e-15), vmax=vmax_err)
+    err_cmap = "hot_r"
+
+    # Pre-compute density backgrounds for all frames.
+    xx_bg, yy_bg = np.meshgrid(X_GRID, Y_GRID, indexing="ij")
+    rho_frames = [analytic_rho(xx_bg, yy_bg, t) for t in t_levels]
+    rho_vmax = max(r.max() for r in rho_frames)
+
+    # Pre-compute shock circle coordinates per frame.
+    theta_c = np.linspace(0, 2 * np.pi, 300)
+    shock_xy = []
+    for t in t_levels:
+        R = (1.0 + t) ** ALPHA
+        shock_xy.append((X_C + R * np.cos(theta_c), Y_C + R * np.sin(theta_c)))
+
+    # ------------------------------------------------------------------
+    # Build figure
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(1, n_panels,
+                             figsize=(6 * n_panels, 6),
+                             sharey=True)
+    if n_panels == 1:
+        axes = [axes]
+
+    meshes, sc_out_list, sc_in_list, circle_list = [], [], [], []
+
+    for p, (ax, name) in enumerate(zip(axes, scheme_names)):
+        traj = trajs[p]
+
+        # Density background.
+        mesh = ax.pcolormesh(
+            X_GRID, Y_GRID, rho_frames[0].T,
+            cmap="Greys", shading="auto",
+            vmin=0.0, vmax=rho_vmax,
+        )
+        meshes.append(mesh)
+
+        # Outside-shock tracers (grey).
+        sc_out = ax.scatter(
+            traj[0, 0, outside], traj[0, 1, outside],
+            s=8, c="gray", alpha=0.35, linewidths=0, zorder=3,
+        )
+        sc_out_list.append(sc_out)
+
+        # Inside-shock tracers (error-coloured).
+        sc_in = ax.scatter(
+            traj[0, 0, inside], traj[0, 1, inside],
+            s=20, c=all_errors[p][0], cmap=err_cmap, norm=norm,
+            linewidths=0, zorder=4,
+        )
+        sc_in_list.append(sc_in)
+
+        # Shock circle.
+        line, = ax.plot(shock_xy[0][0], shock_xy[0][1],
+                        color="white", lw=1.5, ls="--", zorder=5)
+        circle_list.append(line)
+
+        ax.set_xlim(-3.0, 5.0)
+        ax.set_ylim(-4.5, 4.5)
+        ax.set_title(name, fontsize=10)
+        ax.set_xlabel("x")
+
+    axes[0].set_ylabel("y")
+
+    # Shared error colorbar.
+    sm = plt.cm.ScalarMappable(cmap=err_cmap, norm=norm)
+    sm.set_array([])
+    fig.colorbar(sm, ax=axes,
+                 label="Position error vs analytic  (log scale)",
+                 fraction=0.018, pad=0.02)
+
+    title_obj = fig.suptitle(
+        f"t = {t_levels[0]:.3f}  |  frame 1 / {n_frames}",
+        fontsize=11,
+    )
+
+    # ------------------------------------------------------------------
+    # Update function
+    # ------------------------------------------------------------------
+    def _update(frame):
+        t = t_levels[frame]
+
+        for p in range(n_panels):
+            traj = trajs[p]
+
+            # Update density.
+            meshes[p].set_array(rho_frames[frame].T.ravel())
+
+            # Update outside tracers.
+            sc_out_list[p].set_offsets(
+                np.column_stack([traj[frame, 0, outside],
+                                 traj[frame, 1, outside]])
+            )
+
+            # Update inside tracers + error colour.
+            sc_in_list[p].set_offsets(
+                np.column_stack([traj[frame, 0, inside],
+                                 traj[frame, 1, inside]])
+            )
+            sc_in_list[p].set_array(all_errors[p][frame])
+
+            # Update shock circle.
+            circle_list[p].set_data(shock_xy[frame][0], shock_xy[frame][1])
+
+        title_obj.set_text(
+            f"t = {t:.3f}  |  frame {frame + 1} / {n_frames}"
+        )
+        return meshes + sc_out_list + sc_in_list + circle_list
+
+    ani = _mpl_animation.FuncAnimation(
+        fig, _update, frames=n_frames, interval=1000 // fps, blit=False,
+    )
+    writer = _mpl_animation.FFMpegWriter(fps=fps, bitrate=2000)
+    ani.save(output_path, writer=writer, dpi=120)
+    plt.close(fig)
+    print(f"  Saved animation: {output_path}", flush=True)
+
+
+# ---------------------------------------------------------------------------
 # Scheme registry
 # ---------------------------------------------------------------------------
 
@@ -574,3 +763,18 @@ class TestBlastWaveIntegration:
         for name, _, _ in SCHEMES:
             print(f"    {name:<25s}  {rms[name][-1]:.3e}")
         print()
+
+        # ================================================================
+        # Animation: 3-panel, tracers coloured by error vs analytic
+        # ================================================================
+        print("  Building blast-wave animation ...", flush=True)
+        anim_path = os.path.join(PLOT_DIR, "blast_wave_animation.mp4")
+        _animate_tracers(
+            scheme_names=[name for name, _, _ in SCHEMES],
+            trajs=[results[name] for name, _, _ in SCHEMES],
+            t_levels=t_levels,
+            x0=x0,
+            y0=y0,
+            inside=inside,
+            output_path=anim_path,
+        )
