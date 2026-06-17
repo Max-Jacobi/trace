@@ -1,7 +1,4 @@
-"""
-Methods to seed initial tracer positions and times.
-  Should also at least assign a volume element of to each tracer for later use in integration and analysis.
-"""
+"""Provides functions to seed initial tracer positions and times for use with Tracers."""
 
 import numpy as np
 from tqdm import tqdm
@@ -140,8 +137,14 @@ def _gauss_legendre_surface(
 
     Returns
     -------
-    points : ndarray, shape (3, n_quad**2)
-    weights : ndarray, shape (n_quad**2,)
+    x : ndarray, shape (n_quad**2,)
+        Flattened x-coordinates of the quadrature nodes.
+    y : ndarray, shape (n_quad**2,)
+        Flattened y-coordinates of the quadrature nodes.
+    z : ndarray, shape (n_quad**2,)
+        Flattened z-coordinates of the quadrature nodes.
+    W : ndarray, shape (n_quad**2,)
+        Flattened surface-integration weights.
     """
     xi, wi = np.polynomial.legendre.leggauss(n_quad)
 
@@ -184,26 +187,48 @@ def spherical_by_volume(
     **kwargs
     ) -> Tracers:
     """
-    Seed tracers in spherical coordinates, with geometric spacing in r and uniform spacing in theta and phi, such that each tracer represents the same volume element.
-      Parameters:
-        rmin: minimum radius
-        rmax: maximum radius
-        n_r: number of radial bins
-        n_th: number of theta bins
-        n_ph: number of phi bins
-        start_t: initial time for all tracers
-        phi_min: minimum phi angle (default 0)
-        phi_max: maximum phi angle (default 2*pi)
-        theta_min: minimum theta angle (default 0)
-        theta_max: maximum theta angle (default pi)
-        random_shift_in_cell: whether to randomly shift tracer positions within their initial cell to avoid grid artifacts (default True)
-        n_quad: number of Gauss-Legendre quadrature points per dimension used
-            to integrate rho over each cell and compute tracer mass (default 2,
-            giving 2^3 = 8 points).  Use n_quad=1 to recover the single-point
-            (cell-centre) approximation mass = rho * dV.
-        density_key: field key for the mass density used in the mass integral
-            (default 'rho').  Must be present in the FileHandler's key list.
-        **kwargs: additional keyword arguments to pass to Tracers constructor
+    Seed tracers in spherical cells with equal represented volume per tracer.
+
+    Radial bins are geometrically spaced, phi bins are uniformly spaced, and
+    theta bins are built from equally spaced ``cos(theta)`` edges so each
+    angular strip spans equal solid angle.
+
+    Parameters
+    ----------
+    r_min : float
+        Minimum radius.
+    r_max : float
+        Maximum radius.
+    n_r : int
+        Number of radial bins.
+    n_th : int
+        Number of theta bins.
+    n_ph : int
+        Number of phi bins.
+    start_t : float
+        Initial time assigned to every tracer.
+    phi_min : float, optional
+        Minimum azimuthal angle in radians.
+    phi_max : float, optional
+        Maximum azimuthal angle in radians.
+    theta_min : float, optional
+        Minimum polar angle in radians.
+    theta_max : float, optional
+        Maximum polar angle in radians.
+    random_shift_in_cell : bool, optional
+        If True, randomly jitter each tracer position within its spherical cell.
+    n_quad : int, optional
+        Number of Gauss-Legendre quadrature points per dimension used to
+        integrate density over each cell when estimating tracer mass.
+    density_key : str, optional
+        Field key for the density used in the cell-mass integral.
+    **kwargs
+        Additional keyword arguments forwarded to ``Tracers``.
+
+    Returns
+    -------
+    Tracers
+        Tracer collection initialized at the seeded positions and times.
     """
 
     n_tracers = n_r * n_th * n_ph
@@ -219,7 +244,7 @@ def spherical_by_volume(
     th_start = th_edges[:-1] + dth/2
 
     ph_start = np.linspace(phi_min, phi_max, n_ph, endpoint=False)
-    dph = np.full(n_ph, 2*np.pi/n_ph)
+    dph = np.full(n_ph, (phi_max - phi_min) / n_ph)
     ph_start = ph_start + dph/2
     ph_edges = np.linspace(phi_min, phi_max, n_ph + 1)
 
@@ -341,6 +366,11 @@ def spherical_surface_by_area(
         Field key for mass density (default ``'rho'``).
     **kwargs
         Passed to ``Tracers``; must include ``file_handler`` and ``vel_keys``.
+
+    Returns
+    -------
+    Tracers
+        Tracer collection initialized on the requested spherical surface.
     """
 
     forward = t_start[0] < t_start[1]
@@ -540,7 +570,7 @@ def spherical_surface_by_area(
 
     props = [{'mass': m } for m in dm]
 
-    print(pos_inject.shape, t_inject.shape, len(props))
+    print(f"Seeded {len(pos_inject)} tracers at {len(np.unique(t_inject))} unique times.")
     return Tracers(
         positions=pos_inject,
         times=t_inject,

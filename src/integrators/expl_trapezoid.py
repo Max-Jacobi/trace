@@ -1,18 +1,11 @@
-"""
-  Explicit Trapezoidal Method for solving ODEs
-
-   This script implements the explicit trapezoidal method (also known as the
-    modified Euler method) for numerically solving ordinary differential equations (ODEs).
-    The method is a two-step process that first predicts the next value using
-    Euler's method and then corrects it by averaging the slopes at the current
-    and predicted points.
-"""
+"""Explicit trapezoidal integrator module."""
 
 import numpy as np
 
 from .base import InterpolatorCallable, IntegratorBase
 
 class ExplicitTrapezoid(IntegratorBase):
+    """Advance tracer positions with the explicit trapezoidal method."""
 
     def __call__(
         self,
@@ -22,15 +15,24 @@ class ExplicitTrapezoid(IntegratorBase):
         snap_times: np.ndarray | None = None,
     ) -> np.ndarray:
         """
-        Perform a single explicit trapezoidal update for one tracer.
+        Perform a single explicit trapezoidal update for a batch of tracers.
 
-        xn: array shape (d {,n}) current position(s)
-        dt: float
-        interps: tuple of two callables (interp_n, interp_n1)
-        snap_times: unused (two-snapshot scheme needs only dt)
+        Parameters
+        ----------
+        xn : ndarray
+            Current position array with shape ``(d,)`` or ``(d, n)``.
+        dt : float
+            Time step from ``t_n`` to ``t_{n+1}``.
+        interps : tuple of callable
+            Pair of interpolators ``(interp_n, interp_n1)`` evaluated at the
+            start and end snapshots.
+        snap_times : ndarray or None, optional
+            Unused, provided for interface compatibility.
 
-        Returns:
-        - x_new: array shape (d, {n}) new position(s)
+        Returns
+        -------
+        ndarray
+            Updated position array with the same shape as ``xn``.
         """
 
         vn = interps[0](xn)

@@ -1,3 +1,5 @@
+"""Regular-grid interpolator wrappers."""
+
 from scipy.interpolate import RegularGridInterpolator
 import numpy as np
 
@@ -5,8 +7,10 @@ from .base import InterpolatorBase
 
 class RegularInterpolator3D(InterpolatorBase):
     """
-      Simple wrapper around scipy RegularGridInterpolator for Cartesian grids.
-        Expects data with ghost zones included.
+    Wrap ``scipy.interpolate.RegularGridInterpolator`` for 3-D Cartesian data.
+
+    Linear interpolation is used by default, and selected coordinate axes can
+    be transformed with ``log10`` before interpolation.
     """
     n_ghosts = 1
 
@@ -18,6 +22,23 @@ class RegularInterpolator3D(InterpolatorBase):
         log_coords: list[int] = [],
         method: str = "linear",
         ):
+        """
+        Initialize the regular-grid interpolator.
+
+        Parameters
+        ----------
+        *coords : ndarray
+            Coordinate arrays for the ``x``, ``y``, and ``z`` axes.
+        shm : dict[str, str]
+            Mapping from field keys to shared-memory segment names.
+        shape : tuple[int, int, int]
+            Shape of each field array stored in shared memory.
+        log_coords : list[int], optional
+            Indices of coordinate axes that should be transformed with
+            ``log10`` before interpolation.
+        method : str, optional
+            Interpolation method passed to ``RegularGridInterpolator``.
+        """
         super().__init__(shm_names=shm, shape=shape)
         self.log_coords = log_coords
         self.method = method
@@ -39,18 +60,20 @@ class RegularInterpolator3D(InterpolatorBase):
         self.nx = x.shape[0]
         self.ny = y.shape[0]
         self.nz = z.shape[0]
-        assert self.shape == (self.nx, self.ny, self.nz)
+        if (self.nx, self.ny, self.nz) != shape:
+            raise ValueError(
+                f"Coordinate axis lengths ({self.nx}, {self.ny}, {self.nz}) "
+                f"do not match shape {shape}."
+            )
 
         self._x_nodes = np.asarray(x)
         self._y_nodes = np.asarray(y)
         self._z_nodes = np.asarray(z)
 
-        if x.shape[0] != self.nx or y.shape[0] != self.ny or z.shape[0] != self.nz:
-            raise ValueError("x/y/z lengths must match d.shape")
-
         self.interp_cache = {}
 
     def load(self):
+        """Build cached SciPy interpolators for the loaded field arrays."""
         super().load()
         for k, dd in self.data.items():
             self.interp_cache[k] = RegularGridInterpolator(
@@ -62,10 +85,15 @@ class RegularInterpolator3D(InterpolatorBase):
             )
 
     def unload(self):
+        """Release shared-memory data and clear cached interpolator objects."""
         super().unload()
         self.interp_cache.clear()
 
     def __call__(self, coords: np.ndarray) -> np.ndarray:
+        """Evaluate the loaded interpolators at the requested coordinates."""
+        if not self.loaded:
+            raise RuntimeError("Interpolator data not loaded; call load() before querying.")
+
         transformed = []
         for i, c in enumerate(coords):
             c = np.asarray(c)

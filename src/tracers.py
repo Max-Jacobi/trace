@@ -1,3 +1,9 @@
+"""Tracer particle integration engine.
+
+Provides Tracer (single-particle history), Tracers (collection manager), and
+the worker functions used for multiprocessing.
+"""
+
 import numpy as np
 from tqdm import tqdm
 from typing import Any, Optional, Callable
@@ -43,6 +49,24 @@ class Tracer:
         n_steps: int,
         props: dict[str, Any] | None = None,
         ) -> None:
+        """
+        Initialize a tracer with pre-allocated history storage.
+
+        Parameters
+        ----------
+        id : int
+            Unique tracer identifier.
+        position : ndarray
+            Initial Cartesian position.
+        time : float
+            Initial tracer time.
+        keys : list[str]
+            Names of interpolated data fields stored for each step.
+        n_steps : int
+            Maximum number of integration steps to store.
+        props : dict[str, Any] or None, optional
+            Additional tracer metadata written to outputs.
+        """
         self.id = id
         self.initial_position = position.copy()
         self.initial_time = time
@@ -62,6 +86,7 @@ class Tracer:
        time: float,
        data: dict[str, float],
        ) -> None:
+       """Append one integration step to the pre-allocated history arrays."""
        i = self._n_steps
        self._positions[i] = position
        self._times[i]     = time
@@ -82,6 +107,7 @@ class Tracer:
         return {k: self._data[k][:self._n_steps] for k in self._keys}
 
     def output_to_ascii(self, coords: list[str], filebase: str) -> str:
+        """Write the full tracer history to a text file and return the path or ``"failed"``."""
         keys = self._keys
 
         if self.failed:
@@ -116,6 +142,7 @@ class Tracer:
         return filename
 
 class Tracers:
+    """Manage a collection of tracers and drive the time-integration loop."""
 
     def __init__(
         self,
@@ -127,6 +154,26 @@ class Tracers:
         pbar_pos: int = 0,
         props: list[dict[str, list]] | None = None,
         ):
+        """
+        Initialize a tracer collection.
+
+        Parameters
+        ----------
+        positions : ndarray
+            Initial tracer positions with shape ``(n_tracers, 3)``.
+        times : ndarray
+            Initial times for each tracer.
+        vel_keys : list[str]
+            Field keys used for velocity interpolation.
+        integrator : IntegratorBase
+            Time integrator used to advance tracer positions.
+        file_handler : FileHandler
+            Data source that loads snapshots and constructs interpolators.
+        pbar_pos : int, optional
+            TQDM progress-bar row assigned to this tracer manager.
+        props : list[dict[str, list]] or None, optional
+            Per-tracer metadata dictionaries attached to output records.
+        """
         self.vel_keys = vel_keys
         self.integrator = integrator
         self.file_handler = file_handler
@@ -177,6 +224,7 @@ class Tracers:
             self._pool.join()
 
     def integrate_loaded_chunk(self) -> None:
+        """Integrate all active tracers across the currently loaded snapshot chunk."""
         times = self.file_handler.cur_times
         dts = np.diff(times)
         shm_all = self.file_handler.shared_memory[:len(times)]
@@ -321,6 +369,7 @@ class Tracers:
               f"{sum(tr.active for tr in self.tracers)} tracers active.")
 
     def integrate(self, start_t: float, end_t: float) -> None:
+        """Load snapshot chunks and integrate tracers from ``start_t`` to ``end_t``."""
         n_snap = self.integrator.n_snapshots
         chunk_indices, forward, t_start, t_end = self.file_handler.get_chunk_indices(
             start_t, end_t, n_snap=n_snap

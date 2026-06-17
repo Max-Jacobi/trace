@@ -11,6 +11,15 @@ from multiprocessing.shared_memory import SharedMemory
 from .base import InterpolatorBase
 
 class PchipInterpolator3D(InterpolatorBase):
+    """
+    Three-dimensional PCHIP interpolator on a uniform Cartesian grid.
+
+    The interpolator uses a lazy cache of x-direction
+    ``scipy.interpolate.PchipInterpolator`` objects keyed by ``(iy, iz)``
+    index pairs. Query evaluation proceeds sequentially along ``x``, then
+    ``y``, then ``z``, and selected coordinate axes may be transformed with
+    ``log10`` before interpolation.
+    """
     n_ghosts = 3
 
     def __init__(
@@ -21,6 +30,23 @@ class PchipInterpolator3D(InterpolatorBase):
         log_coords: list[int] = [],
         max_cache_size_GB: float = 0.5,
         ):
+        """
+        Initialize the 3-D PCHIP interpolator.
+
+        Parameters
+        ----------
+        *coords : ndarray
+            Coordinate arrays for the ``x``, ``y``, and ``z`` axes.
+        shm : dict[str, str]
+            Mapping from field keys to shared-memory segment names.
+        shape : tuple[int, int, int]
+            Shape of each field array stored in shared memory.
+        log_coords : list[int], optional
+            Indices of coordinate axes that should be transformed with
+            ``log10`` before interpolation.
+        max_cache_size_GB : float, optional
+            Approximate upper bound for the cached x-interpolator memory usage.
+        """
         super().__init__(shm_names=shm, shape=shape)
 
         self.log_coords = log_coords
@@ -43,7 +69,11 @@ class PchipInterpolator3D(InterpolatorBase):
         self.nx = x.shape[0]
         self.ny = y.shape[0]
         self.nz = z.shape[0]
-        assert self.shape == (self.nx, self.ny, self.nz)
+        if (self.nx, self.ny, self.nz) != shape:
+            raise ValueError(
+                f"Coordinate axis lengths ({self.nx}, {self.ny}, {self.nz}) "
+                f"do not match shape {shape}."
+            )
 
         self.x0 = x[0]
         self.y0 = y[0]
@@ -61,6 +91,7 @@ class PchipInterpolator3D(InterpolatorBase):
 
     @staticmethod
     def cell_index(xq, x0, dx, n):
+        """Return the left cell index for scalar query ``xq`` on a uniform grid."""
         frac = (xq - x0) / dx
         ix = int(np.floor(frac))
         if ix < 0:
@@ -70,6 +101,7 @@ class PchipInterpolator3D(InterpolatorBase):
         return ix
 
     def _get_x_interp(self, jy: int, kz: int):
+        """Return the cached x-direction interpolator for grid column ``(jy, kz)``."""
         cache_key = (jy, kz)
         interp = self._xp_cache.get(cache_key)
         if interp is None:
@@ -81,13 +113,13 @@ class PchipInterpolator3D(InterpolatorBase):
             self._xp_cache[cache_key] = interp
 
             while self._estimate_cached_memory() > self.max_cache_size_bytes:
-                #print("PCHIP cache exceeded max size; evicting oldest entry.")
                 self.n_evicted += 1
                 oldest_key = next(iter(self._xp_cache))
                 del self._xp_cache[oldest_key]
         return interp
 
     def __call__(self, coords: np.ndarray) -> np.ndarray:
+        """Evaluate the loaded PCHIP interpolator at the requested coordinates."""
         if not self.loaded:
             raise RuntimeError("Interpolator data not loaded; call load() before querying.")
 
@@ -182,6 +214,7 @@ class PchipInterpolator3D(InterpolatorBase):
 
 
     def _estimate_cached_memory(self) -> int:
+        """Return the total number of bytes used by the x-interpolator cache."""
         total_bytes = 0
         for interp in self._xp_cache.values():
             total_bytes += interp.c.nbytes + interp.x.nbytes
@@ -189,12 +222,12 @@ class PchipInterpolator3D(InterpolatorBase):
 
     def sort_tracers(self, tracers: np.ndarray) -> np.ndarray:
         """
-          Sort tracers by their y and z coordinates to improve cache locality of
-          interpolator access. Specifically, digitise the y and z coordinates
-          into bins corresponding to the yz grid cells, and sort tracers by
-          their (y_bin, z_bin) pairs. This way, tracers that require the same
-          x-interpolator will be grouped together, improving cache hits when
-          evaluating the interpolator for multiple tracers in the same yz cell.
+        Sort tracers by their y and z coordinates to improve cache locality of
+        interpolator access. Specifically, digitise the y and z coordinates
+        into bins corresponding to the yz grid cells, and sort tracers by
+        their (y_bin, z_bin) pairs. This way, tracers that require the same
+        x-interpolator will be grouped together, improving cache hits when
+        evaluating the interpolator for multiple tracers in the same yz cell.
         """
         y_coords = np.array([tr.positions[-1][1] for tr in tracers])
         z_coords = np.array([tr.positions[-1][2] for tr in tracers])

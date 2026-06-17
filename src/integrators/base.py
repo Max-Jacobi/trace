@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Callable
 import numpy as np
 
-InterpolatorCallable = Callable[[np.ndarray], np.ndarray]
+InterpolatorCallable = Callable[[np.ndarray], np.ndarray]  # Interpolates fields at tracer coordinates.
 
 class IntegratorBase(ABC):
     """

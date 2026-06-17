@@ -4,7 +4,12 @@ from multiprocessing.shared_memory import SharedMemory
 
 class InterpolatorBase(ABC):
     """
-    Base class for interpolators.
+    Base class for interpolators backed by shared-memory field arrays.
+
+    Subclasses are constructed with shared-memory names and array metadata,
+    then follow the lifecycle ``construct -> load() -> call -> unload()``.
+    The ``n_ghosts`` attribute declares how many ghost cells are required on
+    each coordinate axis by the interpolation stencil.
     """
     n_ghosts: int # number of ghost zones required per dimension
     keys: list[str] # list of data keys required for interpolation
@@ -25,12 +30,32 @@ class InterpolatorBase(ABC):
 
     @abstractmethod
     def __call__(self, coords: np.ndarray) -> np.ndarray:
+        """
+        Evaluate the interpolator at the requested coordinates.
+
+        Parameters
+        ----------
+        coords : ndarray
+            Coordinate array describing the query points.
+
+        Returns
+        -------
+        ndarray
+            Interpolated values with shape ``(n_keys, n_points)``.
+
+        Notes
+        -----
+        This is an abstract method that must be implemented by subclasses.
+        """
         pass
 
     def __del__(self):
         self.unload()
 
     def load(self):
+        """
+        Open the shared-memory segments and expose their data arrays.
+        """
         for key in self.keys:
             shm = SharedMemory(name=self.shm_names[key])
             self.shm[key] = shm
@@ -38,6 +63,9 @@ class InterpolatorBase(ABC):
         self.loaded = True
 
     def unload(self):
+        """
+        Close shared-memory handles and release the cached data arrays.
+        """
         for key, shm in self.shm.items():
             shm.close()
             del self.data[key]

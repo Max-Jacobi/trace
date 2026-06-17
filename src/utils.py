@@ -5,31 +5,8 @@ from typing import Optional, Callable, Iterable
 from tqdm import tqdm
 import atexit
 
-# _pool: Optional[Pool] = None
-# _n_cpu: Optional[int] = None
-#
-# def _get_pool(n_cpu):
-#     """
-#     Lazily initialize (or reuse) a module-level Pool of size n_cpu.
-#     """
-#     global _pool, _n_cpu
-#     if _pool is None:
-#         _pool = Pool(n_cpu)
-#         _n_cpu = n_cpu
-#         atexit.register(_cleanup_pool)
-#     elif _n_cpu != n_cpu:
-#         raise RuntimeError(f"Tried to get pool with {n_cpu} cpus "
-#                            f"but we only have one with {_n_cpu}!")
-#     return _pool
-#
-# def _cleanup_pool():
-#     global _pool
-#     if _pool is not None:
-#         _pool.close()
-#         _pool.join()
-#         _pool = None
-
 def _pack_args(args_list, func):
+    """Normalize mixed positional and keyword call specifications."""
     packed_args = []
     for item in args_list:
         if isinstance(item, dict):
@@ -41,6 +18,7 @@ def _pack_args(args_list, func):
     return packed_args
 
 def _unpack_args(packed):
+    """Execute one normalized ``(func, args, kwargs)`` call tuple."""
     func, args, kwargs = packed
     return func(*args, **kwargs)
 

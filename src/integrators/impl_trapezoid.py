@@ -10,7 +10,6 @@ Notes:
 - No temporal interpolation at intermediate times is required because the
   scheme only needs velocities at the endpoints t_n and t_{n+1}.
 """
-from typing import Sequence, Callable
 import numpy as np
 
 from .base import InterpolatorCallable, IntegratorBase
@@ -23,9 +22,15 @@ class ImplicitTrapezoid(IntegratorBase):
         """
         Initialize the implicit trapezoid integrator.
 
-        tol: relative tolerance for convergence (Euclidean norm)
-        max_iter: max Picard iterations before fallback
-        relax: relaxation factor in (0,1] applied to Picard updates
+        Parameters
+        ----------
+        tol : float, optional
+            Relative convergence tolerance based on the Euclidean norm.
+        max_iter : int, optional
+            Maximum number of Picard iterations before returning the latest
+            iterate.
+        relax : float, optional
+            Relaxation factor in ``(0, 1]`` applied to each Picard update.
         """
         self.tol = tol
         self.max_iter = max_iter
@@ -39,20 +44,29 @@ class ImplicitTrapezoid(IntegratorBase):
         snap_times: np.ndarray | None = None,
     ) -> np.ndarray:
         """
-        Perform a single implicit trapezoid update for one tracer.
+        Perform a single implicit trapezoid update for a batch of tracers.
 
-        xn: array shape (d {,n}) current position(s)
-        dt: array shape (1,) time step
-        interps: tuple of two callables (interp_n, interp_n1)
-        snap_times: unused (two-snapshot scheme needs only dt)
-        tol: relative tolerance for convergence (Euclidean norm)
-        max_iter: max Picard iterations before fallback
-        relax: relaxation factor in (0,1] applied to Picard updates
+        Parameters
+        ----------
+        xn : ndarray
+            Current position array with shape ``(d,)`` or ``(d, n)``.
+        dt : float
+            Time step from ``t_n`` to ``t_{n+1}``.
+        interps : tuple of callable
+            Pair of interpolators ``(interp_n, interp_n1)`` evaluated at the
+            start and end snapshots.
+        snap_times : ndarray or None, optional
+            Unused, provided for interface compatibility.
 
-        Returns:
-        - x_new: array shape (d, {n}) new position(s)
-        - converged: bool
-        - n_iter: number of iterations used
+        Returns
+        -------
+        ndarray
+            Updated position array with the same shape as ``xn``.
+
+        Notes
+        -----
+        Convergence information is stored on ``self.converged`` and
+        ``self.n_iter``.
         """
 
         self.converged = False
