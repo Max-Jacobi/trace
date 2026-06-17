@@ -289,3 +289,33 @@ class FileHandler(ABC):
         """
         return [cls.setup_interpolator({key: shm_names[key] for key in keys}, extra_data)
                 for shm_names in shared_memory]
+
+    def get_chunk_indices(
+        self,
+        start_t: float,
+        end_t: float,
+        overlap: bool = True,
+    ) -> tuple[np.ndarray, bool, float, float]:
+        file_times = self.times
+        n_files_per_step = self.n_files_per_step
+        forward = end_t > start_t
+
+        if forward:
+            t_start = np.min(file_times[file_times >= start_t])
+            t_end = np.max(file_times[file_times <= end_t])
+            i_start = file_times.searchsorted(t_start, side='left')
+            i_end = file_times.searchsorted(t_end, side='left')
+            if overlap:
+                chunk_indices = np.arange(i_start, i_end+1, n_files_per_step-1)
+            else:
+                chunk_indices = np.arange(i_start, i_end+1, n_files_per_step)
+        else:
+            t_start = np.max(file_times[file_times <= start_t])
+            t_end = np.min(file_times[file_times >= end_t])
+            i_start = file_times.searchsorted(t_start, side='left')
+            i_end = file_times.searchsorted(t_end, side='left')
+            if overlap:
+                chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step+1)
+            else:
+                chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step)
+        return chunk_indices, forward, t_start, t_end

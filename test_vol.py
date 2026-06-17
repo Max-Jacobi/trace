@@ -16,13 +16,13 @@ def main():
     tracer_path = "data"
     data_path = f"{tracer_path}/transformed/"
 
-    start_t = 16080
-    end_t   = 14760
-    rmin    = 300
+    start_t = 11600
+    end_t   = 0
+    rmin    = 200
     rmax    = 1000
-    n_r     = 3
-    n_th    = 2
-    n_ph    = 3
+    n_r     = 19
+    n_th    = 24
+    n_ph    = 75
 
     keys = ('V_u_x', 'V_u_y', 'V_u_z',
             'T', 'hu_t', 's',
@@ -40,7 +40,7 @@ def main():
             if line.startswith("MemAvailable:"):
                 free_mem_GB = int(line.split()[1]) / 1024**2  # convert from kB to bytes
                 break
-    files_per_step = 10 #max(2, n_cpu)
+    files_per_step = max(2, n_cpu)
     n_interpolators = (len(keys)+len(vel_keys))*n_cpu
     mem_avail_per_interp_GB = 0.8 * free_mem_GB / n_interpolators
 
@@ -90,9 +90,6 @@ def main():
     tracers.integrate(start_t, end_t)
 
     for tr in tracers.tracers:
-        i_tmax = np.argmax(tr.times)
-        tr.props['mass'] = tr.props['dV'] * tr.data['rho'][i_tmax]
-
         short_keys = {key: key.split(".")[-1] for key in tr.data.keys()}
         for key, short in short_keys.items():
             if short == key:
@@ -101,5 +98,6 @@ def main():
             del tr.data[key]
 
         tr.output_to_ascii(coords=['x', 'y', 'z'], filebase=filebase)
+    print(f"Tracers integrated and saved to {filebase}*.txt")
 if __name__ == "__main__":
      main()

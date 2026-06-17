@@ -86,6 +86,16 @@ class Tracer:
     def output_to_ascii(self, coords: list[str], filebase: str) -> str:
         keys = self._keys
 
+        if self.failed:
+            status = "failed"
+        elif self.done:
+            status = "done"
+        elif self.active:
+            status = "active"
+        else:
+            status = "not started"
+        self.props['status'] = status
+
         props = "; ".join((f"{key}={val}" for key, val in self.props.items()))
         legend = "{:>23s}" + "{:>26s}"* (4 + len(keys) - 1)
         legend = legend.format("time", *coords, *keys)
@@ -137,8 +147,11 @@ class Tracers:
         if props is None:
             props = [{} for _ in range(positions.shape[0])]
 
-        self.tracers = np.array([Tracer(id=i, position=pos, time=t, keys=self.file_handler.keys, n_steps=n_steps, props=prop)
-                        for i, (pos, t, prop) in enumerate(zip(positions, times, props))])
+        self.tracers = np.array([
+            Tracer(id=i, position=pos, time=t, keys=self.file_handler.keys,
+                   n_steps=n_steps, props=prop)
+            for i, (pos, t, prop) in enumerate(zip(positions, times, props))
+        ])
 
         self._chunk_id = 0
 
@@ -165,7 +178,6 @@ class Tracers:
             self._pool.terminate()
             self._pool.join()
 
-
     def integrate_loaded_chunk(self) -> None:
         times = self.file_handler.cur_times
         dts = np.diff(times)
@@ -176,7 +188,7 @@ class Tracers:
         chunk_id = self._chunk_id
 
         n_cpu = self.file_handler.parallel_kwargs["n_cpu"]
-        n_bunches = 20 * n_cpu
+        n_bunches = 3 * n_cpu
 
         # One unloaded interpolator on the main process — only used for sort_tracers
         # (which only needs the grid coordinates, not the loaded data arrays).
@@ -192,6 +204,7 @@ class Tracers:
             total=len(dts),
             position=self.pbar_pos,
             unit="time step",
+            ncols=0,
             **pbar_kwargs,
         ):
             shm_vel_0 = {k: shm_all[i][k]   for k in self.vel_keys}
@@ -202,22 +215,40 @@ class Tracers:
                                     if len(tr.positions) == 0 and np.isclose(tr.initial_time, time)])
 
             if len(new_tracers) > 0:
-                init_pos = np.array([tracer.initial_position for tracer in new_tracers]).T
-                # Initialise on the main process using a temporary loaded interpolator.
-                init_interp = type(self.file_handler).setup_interpolator(
-                    {k: shm_all[i][k] for k in self.file_handler.keys}, extra_data
+                n_init_bunches = max(1, min(n_bunches, len(new_tracers)))
+                init_pos  = np.array([tr.initial_position for tr in new_tracers]).T  # (3, n_new)
+                shm_init  = {k: shm_all[i][k] for k in self.file_handler.keys}
+
+                init_bunches = [b for b in np.array_split(new_tracers, n_init_bunches) if len(b) > 0]
+                pos_splits   = np.cumsum([len(b) for b in init_bunches[:-1]])
+                pos_bunches  = np.split(init_pos, pos_splits, axis=1)
+
+                init_task_args = [
+                    (j, pos, shm_init)
+                    for j, pos in enumerate(pos_bunches)
+                ]
+                init_results = do_parallel_star_pool(
+                    self._pool,
+                    _initialize_bundle,
+                    init_task_args,
+                    chunksize=1,
+                    position=self.pbar_pos+1,
+                    leave=False,
+                    unit="bunches",
+                    ncols=0,
+                    desc=f"Initializing {len(new_tracers)} new tracers",
+                    **pbar_kwargs,
                 )
-                init_interp.load()
-                initial_data = init_interp(init_pos)  # shape (n_keys, n_tracers)
-                init_interp.unload()
-                del init_interp
-                for tr, data in zip(new_tracers, initial_data.T):
-                    tr.add_step(
-                        position=tr.initial_position,
-                        time=tr.initial_time,
-                        data=dict(zip(self.file_handler.keys, data)),
-                    )
-                    tr.active = True
+                init_results.sort(key=lambda r: r[0])
+
+                for (_, init_data), init_bunch in zip(init_results, init_bunches):
+                    for j, tr in enumerate(init_bunch):
+                        tr.add_step(
+                            position=tr.initial_position,
+                            time=tr.initial_time,
+                            data=dict(zip(self.file_handler.keys, init_data[:, j])),
+                        )
+                        tr.active = True
 
             active_tracers = np.array([tr for tr in self.tracers if tr.active])
 
@@ -248,6 +279,7 @@ class Tracers:
                 position=self.pbar_pos+1,
                 leave=False,
                 unit="bunches",
+                desc=f"Integrating {len(active_tracers)} active tracers",
                 ncols=0,
                 **pbar_kwargs,
             )
@@ -267,42 +299,13 @@ class Tracers:
                             time=time + dt,
                             data=dict(zip(self.file_handler.keys, new_data[:, j])),
                         )
-            # print free memory after each step
-            with open("/proc/meminfo") as f:
-                meminfo = f.read()
-            mem_free = int(meminfo.split("MemFree:")[1].split()[0])
-            est_tracer_memory = sum(
-                tr._positions.nbytes + tr._times.nbytes +
-                sum(arr.nbytes for arr in tr._data.values())
-                for tr in self.tracers
-            )
-
-            #print()
-            #print(f"Free memory: {mem_free/1024**2:.2f} GB")
-            #print(f"Estimated tracer data: {est_tracer_memory/1024**3:.2e} GB")
-
 
         print(f"{sum(tr.done for tr in self.tracers)} tracers done. "
               f"{sum(tr.active for tr in self.tracers)} tracers active.")
 
     def integrate(self, start_t: float, end_t: float) -> None:
+        chunk_indices, forward, t_start, t_end = self.file_handler.get_chunk_indices(start_t, end_t)
 
-        file_times = self.file_handler.times
-        n_files_per_step = self.file_handler.n_files_per_step
-        forward = end_t > start_t
-
-        if forward:
-            t_start = np.min(file_times[file_times >= start_t])
-            t_end = np.max(file_times[file_times <= end_t])
-            i_start = file_times.searchsorted(t_start, side='left')
-            i_end = file_times.searchsorted(t_end, side='left')
-            chunk_indices = np.arange(i_start, i_end+1, n_files_per_step-1)
-        else:
-            t_start = np.max(file_times[file_times <= start_t])
-            t_end = np.min(file_times[file_times >= end_t])
-            i_start = file_times.searchsorted(t_start, side='left')
-            i_end = file_times.searchsorted(t_end, side='left')
-            chunk_indices = np.arange(i_start, i_end-1, -n_files_per_step+1)
         print(f"Integrating from t={t_start} to t={t_end} with {len(chunk_indices)} chunks.")
 
         for i_step in chunk_indices:
@@ -311,7 +314,6 @@ class Tracers:
             if all(tr.done for tr in self.tracers):
                 print("All tracers done. Stopping integration.")
                 break
-
 
 def _init_worker_persistent(
     integrator: IntegratorBase,
@@ -454,3 +456,36 @@ def _integrate_positions(
         new_data[:, valid_mask] = _data_interp(new_pos[:, valid_mask])
 
     return bundle_idx, new_pos, new_data, valid_mask
+
+
+def _initialize_bundle(
+    bundle_idx: int,
+    init_positions: np.ndarray,
+    shm_init: dict,
+) -> tuple:
+    """
+    Worker function: interpolate initial field data for a bundle of tracers.
+
+    Parameters
+    ----------
+    bundle_idx : int
+        Bundle index used to re-order results from imap_unordered.
+    init_positions : ndarray, shape (3, n_tracers)
+        Cartesian positions of the tracers to initialise.
+    shm_init : dict[str, str]
+        Shared-memory name mappings for all field keys at the init timestep.
+
+    Returns
+    -------
+    bundle_idx, init_data (n_keys, n_tracers)
+    """
+    global _setup_interp_fn, _extra_data
+
+    interp = _setup_interp_fn(shm_init, _extra_data)
+    interp.load()
+    try:
+        init_data = interp(init_positions)  # (n_keys, n_tracers)
+    finally:
+        interp.unload()
+
+    return bundle_idx, init_data
