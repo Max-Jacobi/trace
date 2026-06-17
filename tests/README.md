@@ -3,7 +3,10 @@
 All tests live in `tests/` and are run with [pytest](https://docs.pytest.org).
 
 ```bash
-# Run the full suite (93 tests, < 1 second)
+# Run the full fast suite (93 tests, < 1 second)
+python -m pytest tests/ -v --ignore=tests/test_integration_blast.py
+
+# Run all tests including the exploratory blast-wave test (~40 s)
 python -m pytest tests/ -v
 
 # Run a single file
@@ -11,22 +14,24 @@ python -m pytest tests/test_integrators.py -v
 python -m pytest tests/test_interpolators.py -v
 python -m pytest tests/test_seeds.py -v
 python -m pytest tests/test_seeds_surface.py -v
+python -m pytest tests/test_integration_blast.py -v -s   # prints progress + error table
 
 # Run a single class or test
 python -m pytest tests/test_integrators.py::TestRK4 -v
 python -m pytest tests/test_seeds.py::TestSphericalByVolume::test_constant_density_full_sphere_mass -v
 ```
 
-All tests are self-contained: they require no real simulation data, no MPI or
-multiprocessing, and the only shared memory used is created and cleaned up
-within each test.  The full suite runs in under one second.
+All unit tests are self-contained: no real simulation data, no MPI, and any
+shared memory is created and cleaned up within each test.  The fast suite
+(excluding the blast-wave test) runs in under one second.
 
-| File | Tests | What it covers |
-|---|---|---|
-| `test_integrators.py` | 29 | ExplicitTrapezoid, ImplicitTrapezoid, RK4 |
-| `test_interpolators.py` | 27 | RegularInterpolator3D, PchipInterpolator3D, CartesianToSpherical |
-| `test_seeds.py` | 25 | `_gauss_legendre_3d/surface` helpers, `spherical_by_volume` |
-| `test_seeds_surface.py` | 12 | `spherical_surface_by_area` |
+| File | Tests | Runtime | What it covers |
+|---|---|---|---|
+| `test_integrators.py` | 29 | < 1 s | ExplicitTrapezoid, ImplicitTrapezoid, RK4 |
+| `test_interpolators.py` | 27 | < 1 s | RegularInterpolator3D, PchipInterpolator3D, CartesianToSpherical |
+| `test_seeds.py` | 25 | < 1 s | `_gauss_legendre_3d/surface` helpers, `spherical_by_volume` |
+| `test_seeds_surface.py` | 12 | < 1 s | `spherical_surface_by_area` |
+| `test_integration_blast.py` | 1 | ~40 s | End-to-end blast-wave integration; saves plots to `tests/plots/` |
 
 ---
 
@@ -775,3 +780,105 @@ large cells. Only the `n_quad=1` equality is machine-exact.
 | Test | What it verifies |
 |---|---|
 | `test_positions_inside_radial_range` | With `r_min=1.5`, `r_max=4.0` and `random_shift_in_cell=False`, every tracer's initial position satisfies `1.5 <= r <= 4.0`. |
+
+---
+
+## `test_integration_blast.py`
+
+A single exploratory integration test that runs the full pipeline end-to-end
+on a prescribed analytic blast-wave field and saves comparison plots.  There
+are **no pass/fail assertions on numerical values**: the test passes as long as
+no exception is raised.
+
+### Physical setup
+
+A 2-D Sedov-Taylor-like blast wave expands from an off-centre explosion point
+`(X_C, Y_C) = (0.5, 0.3)`.
+
+**Shock radius** (Sedov exponent alpha = 0.5):
+```
+R_shock(t) = (1 + t)^0.5
+```
+At T_START = 1:  R ~ 1.41.  At T_END = 4:  R ~ 2.24.
+
+**Velocity field** (exact inside shock, smooth taper to zero outside):
+```
+v_x = (alpha / (1+t)) * (x - X_C) * f(xi)
+v_y = (alpha / (1+t)) * (y - Y_C) * f(xi)
+f(xi) = 0.5 * (1 - tanh((xi - 1) / sigma)),  sigma = 0.06
+xi = r / R_shock(t)   (dimensionless radius from centre)
+```
+The velocity field is radially symmetric (spherical shock).
+
+**Density field** (angularly asymmetric to give interesting M(r) profiles):
+```
+rho(xi, theta) = ambient(theta) * (1 - f(xi))
+               + rho_inner * f(xi)
+               + rho_peak * angular(theta) * exp(-((xi-1)/sig_rho)^2)
+angular(theta) = 1 + 0.5 * sin(2*theta + 0.8)
+```
+The angular factor creates a genuinely asymmetric mass distribution: the
+compressed shell is ~1.5x denser in the upper-right direction.
+
+**Analytic tracer trajectory** inside the shock (xi0 < 1):
+
+Because xi = r / R_shock(t) is conserved along each streamline inside the
+shock, the exact trajectory is:
+```
+x(t) = X_C + (x0 - X_C) * ((1+t) / (1+T_START))^alpha
+y(t) = Y_C + (y0 - Y_C) * ((1+t) / (1+T_START))^alpha
+```
+This is used as ground truth in the error plot.
+
+### Tracer setup
+
+225 tracers placed on a 15x15 Cartesian grid spanning x in [-2.5, 3.5] and
+y in [-3, 3].  This covers the full range from deep inside the initial shock
+cavity to well outside.
+
+Initial tracer mass: `m_i = rho(x_i, y_i, T_START) * dA` (Lagrangian mass,
+conserved throughout the integration).
+
+### Grid
+
+```
+60 x 60 x 7 nodes
+x: [-4, 6],  y: [-5, 5],  z: [0, 1]
+```
+The z dimension is a thin dummy axis so that PCHIP stencils remain valid.
+All tracers are fixed at z = 0.5 (centre of the valid PCHIP range).
+
+### Schemes compared
+
+| Scheme | Spatial interp. | Time integrator | Order |
+|---|---|---|---|
+| Linear + Euler | RegularInterpolator3D (linear) | ForwardEuler | 1st |
+| PCHIP + Impl.Trap. | PchipInterpolator3D (monotone cubic) | ImplicitTrapezoid | 2nd |
+| PCHIP + RK4 | PchipInterpolator3D (monotone cubic) | RK4 (PCHIP time interp) | 4th |
+
+20 time steps from T = 1.0 to T = 4.0 (DT = 0.15).  RK4 uses one extra
+padded snapshot on each side for its 4-point cubic-in-time interpolation.
+
+### Observed errors at T_END (for tracers with xi0 < 0.6)
+
+| Scheme | RMS position error |
+|---|---|
+| Linear + Euler | ~5e-3 |
+| PCHIP + Impl.Trap. | ~7e-5 |
+| PCHIP + RK4 | ~1e-4 |
+
+Linear + Euler is ~75x worse than the higher-order schemes.  PCHIP +
+ImplicitTrapezoid is slightly more accurate than PCHIP + RK4 here because the
+velocity field is smooth and nearly linear inside the shock: the 2nd-order
+scheme is already well-converged at DT = 0.15, while RK4's 4-point time
+interpolation introduces a small additional error at the midpoint substeps.
+
+### Output plots
+
+Saved to `tests/plots/` (created automatically):
+
+| File | Content |
+|---|---|
+| `blast_wave_final_positions.png` | One panel per scheme: tracer scatter at T_END overlaid on density background and analytic shock circle |
+| `blast_wave_M_R.png` | 2x2 panels: M(<r) for all three schemes at 4 evenly spaced timesteps.  The shock ring (high M gradient) moves outward in each panel. |
+| `blast_wave_errors.png` | RMS position error vs time on a log scale for the 225 tracers with xi0 < 0.6 (analytic trajectory valid) |
