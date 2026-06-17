@@ -42,7 +42,7 @@ def _mass_flux_bundle(
     shm_needed: dict,
 ) -> tuple:
     """
-    Evaluate ρ·v_r at all quadrature points for a bundle of tracers and return
+    Evaluate rho*v_r at all quadrature points for a bundle of tracers and return
     the surface-integrated dm for each tracer in the bundle.
 
     Pickled per task: pos_q_flat, w_q, shm_needed (string dict).
@@ -75,13 +75,13 @@ def _gauss_legendre_3d(
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Cartesian Gauss-Legendre quadrature nodes and weights for a spherical
-    volume cell ``[r_lo, r_hi] × [th_lo, th_hi] × [ph_lo, ph_hi]``.
+    volume cell ``[r_lo, r_hi] x [th_lo, th_hi] x [ph_lo, ph_hi]``.
 
-    The weights absorb the Jacobian ``r² sin(θ)`` and the mapping half-widths
+    The weights absorb the Jacobian ``r^2 sin(theta)`` and the mapping half-widths
     so that ``mass = weights @ rho(points)`` gives the cell-integrated mass.
 
     With ``n_quad = 1`` the single node is the cell centre and the weight
-    equals ``dV = r_c² sin(θ_c) Δr Δθ Δφ``, recovering the single-point
+    equals ``dV = r_c^2 sin(theta_c) Deltar Deltatheta Deltaphi``, recovering the single-point
     approximation.
 
     Parameters
@@ -127,9 +127,9 @@ def _gauss_legendre_surface(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Cartesian Gauss-Legendre quadrature nodes and weights for a 2-D spherical
-    surface cell at radius ``r_surf`` over ``[th_lo, th_hi] × [ph_lo, ph_hi]``.
+    surface cell at radius ``r_surf`` over ``[th_lo, th_hi] x [ph_lo, ph_hi]``.
 
-    The weights absorb ``r_surf² sin(θ)`` and the half-widths so that
+    The weights absorb ``r_surf^2 sin(theta)`` and the half-widths so that
     ``quantity = weights @ f(points)`` gives the surface-integrated quantity.
 
     Parameters
@@ -199,7 +199,7 @@ def spherical_by_volume(
         random_shift_in_cell: whether to randomly shift tracer positions within their initial cell to avoid grid artifacts (default True)
         n_quad: number of Gauss-Legendre quadrature points per dimension used
             to integrate rho over each cell and compute tracer mass (default 2,
-            giving 2³ = 8 points).  Use n_quad=1 to recover the single-point
+            giving 2^3 = 8 points).  Use n_quad=1 to recover the single-point
             (cell-centre) approximation mass = rho * dV.
         density_key: field key for the mass density used in the mass integral
             (default 'rho').  Must be present in the FileHandler's key list.
@@ -246,7 +246,7 @@ def spherical_by_volume(
     r_edges_1d  = np.geomspace(r_min, r_max, n_r+1)
     th_edges_1d = np.sort(np.arccos(np.linspace(np.cos(theta_min), np.cos(theta_max), n_th+1)))
 
-    quads = []   # (pts, wts) per tracer — built alongside props
+    quads = []   # (pts, wts) per tracer - built alongside props
     props = []
     for ir in range(n_r):
         for ith in range(n_th):
@@ -316,7 +316,7 @@ def spherical_surface_by_area(
 
     * One ``MassStep`` is registered per file time in the slot's window so
       that ``Tracers.initialize_masses`` accumulates the full mass flux
-      ``dm = dt_k · ∫ ρ v_r dA`` over the entire window.
+      ``dm = dt_k * int rho v_r dA`` over the entire window.
     * When ``random_shift_in_cell=True`` (default), the tracer's injection
       time is drawn uniformly from the file times inside the window, giving
       smoother temporal coverage.
@@ -374,7 +374,7 @@ def spherical_surface_by_area(
 
 
     # -----------------------------------------------------------------------
-    # Build slot → file-time windows using the FileHandler's time axis
+    # Build slot -> file-time windows using the FileHandler's time axis
     # -----------------------------------------------------------------------
     file_times = np.asarray(file_handler.times)
     ft_bins = np.zeros(len(file_times) + 1)
@@ -449,8 +449,8 @@ def spherical_surface_by_area(
     z = r_surf * np.cos(th_inject)
     pos_inject = np.array([x.flatten(), y.flatten(), z.flatten()]).T
     pos_quads = pos_quads.reshape((3, n_q2, n_tr))
-    # _gauss_legendre_surface weights already include r_surf² sin(θ) dθ dφ;
-    # only scale by the per-file time step dt/n_g to get dm = ∫ r² sin(θ) ρ v_r dθ dφ dt.
+    # _gauss_legendre_surface weights already include r_surf^2 sin(theta) dtheta dphi;
+    # only scale by the per-file time step dt/n_g to get dm = int r^2 sin(theta) rho v_r dtheta dphi dt.
     w_quads = w_quads.reshape((n_q2, n_tr)) * (dt_g / n_g).reshape((1, n_tr))
     t_inject = t_inject.flatten()
 

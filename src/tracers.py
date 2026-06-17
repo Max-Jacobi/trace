@@ -8,7 +8,7 @@ from .file import FileHandler
 from .utils import do_parallel_star, do_parallel_star_pool
 
 # ---------------------------------------------------------------------------
-# Worker-process globals — set once by _init_worker_persistent, then updated
+# Worker-process globals - set once by _init_worker_persistent, then updated
 # lazily by _ensure_interps each time the interpolator data changes.
 # ---------------------------------------------------------------------------
 
@@ -193,7 +193,7 @@ class Tracers:
         n_cpu = self.file_handler.parallel_kwargs["n_cpu"]
         n_bunches = 3 * n_cpu
 
-        # One unloaded interpolator on the main process — only used for sort_tracers
+        # One unloaded interpolator on the main process - only used for sort_tracers
         # (which only needs the grid coordinates, not the loaded data arrays).
         sort_interp = type(self.file_handler).setup_interpolator(
             {k: shm_all[0][k] for k in self.vel_keys}, extra_data
@@ -225,7 +225,7 @@ class Tracers:
             shm_vels = [{k: shm_all[i+j][k] for k in self.vel_keys} for j in range(n_snap)]
             snap_times = times[i:i+n_snap]
             # Data interpolation always at the step-end snapshot (position 1 for
-            # 2-snap, position 2 for 4-snap — i.e. i_start_in_window + 1).
+            # 2-snap, position 2 for 4-snap - i.e. i_start_in_window + 1).
             shm_data = shm_all[i + i_start_in_window + 1]  # all keys
 
             new_tracers = np.array([tr for tr in self.tracers
@@ -275,7 +275,7 @@ class Tracers:
             if sort_interp is not None and hasattr(sort_interp, "sort_tracers"):
                 active_tracers = sort_interp.sort_tracers(active_tracers)
 
-            # Extract only the current positions — O(n_tracers) pickle data,
+            # Extract only the current positions - O(n_tracers) pickle data,
             # independent of integration history, eliminating the memory growth.
             positions = np.array([tr.positions[-1] for tr in active_tracers]).T  # (3, n_active)
 
@@ -343,7 +343,7 @@ def _init_worker_persistent(
     data_keys: tuple[str, ...],
 ) -> None:
     """
-    Pool initializer — called once per worker when the pool is first created.
+    Pool initializer - called once per worker when the pool is first created.
 
     Sets only the constants that never change across the entire run.
     Interpolator state is zero-initialized and populated lazily by
@@ -376,20 +376,20 @@ def _ensure_interps(
     Lazily (re-)load worker interpolators to match the current step.
 
     Three cases:
-      1. chunk_id changed — full reinit: all interpolators are rebuilt from
+      1. chunk_id changed - full reinit: all interpolators are rebuilt from
          scratch because shared-memory slot names are reused with new data
          between chunks, making any cached state stale.
-      2. shm_vels[0] changed but chunk is same — step transition within chunk:
+      2. shm_vels[0] changed but chunk is same - step transition within chunk:
          the window shifts by one: drop the oldest interpolator (unload it),
          roll the rest forward (preserving their valid caches), then load only
          the new trailing snapshot and the new data interpolator.
-      3. Same chunk, same step — nothing to do.
+      3. Same chunk, same step - nothing to do.
     """
     global _chunk_id, _vel_interps, _data_interp
     global _shm_names_vel, _shm_names_data
 
     if chunk_id != _chunk_id:
-        # ── Full reinit ──────────────────────────────────────────────────────
+        # -- Full reinit ------------------------------------------------------
         for interp in _vel_interps:
             interp.unload()
         if _data_interp is not None:
@@ -409,7 +409,7 @@ def _ensure_interps(
         _shm_names_data = shm_data
 
     elif shm_vels[0] != _shm_names_vel[0]:
-        # ── Step transition within chunk ─────────────────────────────────────
+        # -- Step transition within chunk -------------------------------------
         # The window advances by one snapshot.  Roll existing interpolators
         # forward (preserving their caches), unload only the one that falls
         # off the leading edge, then load the new trailing snapshot.
@@ -426,7 +426,7 @@ def _ensure_interps(
 
         _shm_names_vel  = list(shm_vels)
         _shm_names_data = shm_data
-    # else: same chunk, same step — all interpolators already current.
+    # else: same chunk, same step - all interpolators already current.
 
 
 def _integrate_positions(
