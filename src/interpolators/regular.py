@@ -42,6 +42,7 @@ class RegularInterpolator3D(InterpolatorBase):
         super().__init__(shm_names=shm, shape=shape)
         self.log_coords = log_coords
         self.method = method
+        self.interp_cache = {}  # initialised early so __del__ is safe on failed init
 
         transformed = []
         for i, c in enumerate(coords):
@@ -69,8 +70,6 @@ class RegularInterpolator3D(InterpolatorBase):
         self._x_nodes = np.asarray(x)
         self._y_nodes = np.asarray(y)
         self._z_nodes = np.asarray(z)
-
-        self.interp_cache = {}
 
     def load(self):
         """Build cached SciPy interpolators for the loaded field arrays."""
