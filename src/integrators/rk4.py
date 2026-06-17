@@ -27,9 +27,14 @@ Lagrange weights at t_eval for nodes (t0, t1, t2, t3):
 
 PCHIP (Fritsch-Carlson 1980) derivative estimates at t1 and t2:
     h_i = t_{i+1} - t_i,  s_i = (v_{i+1} - v_i) / h_i
-    d_j = (h_{j-1} + h_j) / ((2h_j + h_{j-1})/s_{j-1} + (h_j + 2h_{j-1})/s_j)
+    d_j = 3*(h_{j-1} + h_j) / ((2h_j + h_{j-1})/s_{j-1} + (h_j + 2h_{j-1})/s_j)
           when s_{j-1} and s_j share the same sign, else 0.
     Hermite cubic evaluated at alpha = (t_eval - t1) / h1.
+
+    Note: the numerator factor 3*(h_{j-1} + h_j) matches eq. (2.9) in Fritsch &
+    Carlson (1980).  Omitting this factor of 3 reduces derivative estimates to
+    1/3 of their correct values, which degrades the overall scheme from 4th to
+    2nd order in time.
 """
 
 import numpy as np
@@ -106,7 +111,10 @@ def _pchip_v_mid(
         safe_sa = np.where(same_sign, sa, 1.0)
         safe_sb = np.where(same_sign, sb, 1.0)
         denom = (2*hb + ha) / safe_sa + (hb + 2*ha) / safe_sb
-        return np.where(same_sign, (ha + hb) / denom, 0.0)
+        # Fritsch-Carlson 1980, eq. (2.9): numerator is (w1 + w2) = 3*(ha + hb).
+        # The factor of 3 is required; omitting it makes derivatives 1/3 of
+        # their correct values, which degrades RK4 from O(dt^4) to O(dt^2).
+        return np.where(same_sign, 3.0 * (ha + hb) / denom, 0.0)
 
     d1 = _fc_deriv(s0, s1, h0, h1)  # derivative at t1
     d2 = _fc_deriv(s1, s2, h1, h2)  # derivative at t2

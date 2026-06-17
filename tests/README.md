@@ -861,17 +861,17 @@ padded snapshot on each side for its 4-point cubic-in-time interpolation.
 
 ### Observed errors at T_END (for tracers with xi0 < 0.6)
 
-| Scheme | RMS position error |
-|---|---|
-| Linear + Euler | ~5e-3 |
-| PCHIP + Impl.Trap. | ~7e-5 |
-| PCHIP + RK4 | ~1e-4 |
+| Scheme | RMS position error | Order |
+|---|---|---|
+| Linear + Euler | ~5e-3 | 1st |
+| PCHIP + Impl.Trap. | ~7e-5 | 2nd |
+| PCHIP + RK4 | ~7e-7 | 4th (hits spatial floor) |
 
-Linear + Euler is ~75x worse than the higher-order schemes.  PCHIP +
-ImplicitTrapezoid is slightly more accurate than PCHIP + RK4 here because the
-velocity field is smooth and nearly linear inside the shock: the 2nd-order
-scheme is already well-converged at DT = 0.15, while RK4's 4-point time
-interpolation introduces a small additional error at the midpoint substeps.
+RK4 is ~100x more accurate than ImplicitTrapezoid.  At N >= 10 steps the RK4
+temporal error drops below the spatial interpolation floor (~7e-7) set by the
+finite-resolution PCHIP spatial grid; further halving DT gives no improvement.
+ImplicitTrapezoid has not yet reached this floor at N = 20 and still shows
+clean O(dt^2) convergence.
 
 ### Output plots
 
