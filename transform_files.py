@@ -47,6 +47,7 @@ def parse_args():
     parser.add_argument('input_files', nargs='+', help='Paths to the input surface files.')
     parser.add_argument('--output_dir', default='transformed_files', help='Directory to save the transformed files.')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of worker processes to use for parallel processing.')
+    parser.add_argument('--delete', action='store_true', help='Delete the original files after transformation.')
     return parser.parse_args()
 
 def reduce_m1_quantities(data: dict):
@@ -65,9 +66,9 @@ def reduce_m1_quantities(data: dict):
     eps_00 = J_00/n_00
     eps_01 = J_01/n_01
     eps_02 = J_02/n_02
-    F_00 = sqg*n_00
-    F_01 = sqg*n_01
-    F_02 = sqg*n_02
+    F_00 = n_00/sqg
+    F_01 = n_01/sqg
+    F_02 = n_02/sqg
     data["F_nue"] = F_00
     data["F_anue"] = F_01
     data["F_nux"] = F_02
@@ -78,7 +79,8 @@ def reduce_m1_quantities(data: dict):
                 "st_H_u_t_00 st_H_u_t_01 st_H_u_t_02 "
                 "st_H_u_x_00 st_H_u_x_01 st_H_u_x_02 "
                 "st_H_u_y_00 st_H_u_y_01 st_H_u_y_02 "
-                "st_H_u_z_00 st_H_u_z_01 st_H_u_z_02 ").split():
+                "st_H_u_z_00 st_H_u_z_01 st_H_u_z_02 "
+                "s hu_t").split():
         del data[key]
 
 def process_file(file_path):
@@ -89,6 +91,8 @@ def process_file(file_path):
         pass
     output_path = f"{args.output_dir}/{file_path.split('/')[-1]}"
     write_file(coordinates, data, output_path)
+    if args.delete:
+        os.remove(file_path)
 
 ##
 

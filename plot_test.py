@@ -15,15 +15,15 @@ rhofac = us.GeometricSolar.MassDensityConversion(us.CGS)
 
 ##
 
-PATH_IN     = "data/test_nr30_nth15_nph30_impl_pch"
-PATH_OUT    = "data/test_surf_nth15_nph30_impl_pch"
+PATH_IN     = "data/test_nr19_nth24_nph75_impl_pch"
+PATH_OUT    = "data/test_surf_nth29_nph91_impl_pch"
 OUTPUT_PATH = "data"
 N_CPU       = 12
 
 prefix = "tracer_"
 
 files = []
-#files += sorted(pl.Path(PATH_IN).glob("tracer*"))
+files += sorted(pl.Path(PATH_IN).glob("tracer*"))
 files += sorted(pl.Path(PATH_OUT).glob("tracer*"))
 file_paths = [str(f) for f in files]
 
@@ -56,13 +56,15 @@ fig, ax = plt.subplots(2, 3, figsize=(15, 10))
 ye_norm = Normalize(vmin=0.1, vmax=0.6)
 theta_norm = Normalize(vmin=0, vmax=90)
 cmap = plt.get_cmap("jet_r")
-for traj in trajs[::5]:
+for traj in trajs[::100]:
     t = traj.data["time"] * tfac
+    rho_r3 = traj.data["rho"]*traj.data["r"]**3
     r = traj.data["r"] * lfac
     theta = traj.data["theta"]
     phi = traj.data["phi"]
 
     T = traj.data["T"] * Tfac
+    s = traj.data["s"]
     rho = traj.data["rho"] * rhofac
     ye = traj.data["r_0"]
     # color = cmap(ye_norm(np.average(ye)))
@@ -72,14 +74,15 @@ for traj in trajs[::5]:
     ax[0, 0].plot(t, r, **kw)
     ax[0, 1].plot(t, phi, **kw)
     ax[0, 2].plot(t, theta, **kw)
-    ax[1, 0].plot(t, rho, **kw)
-    ax[1, 1].plot(t, T, **kw)
+    ax[1, 0].plot(t, rho_r3, **kw)
+    ax[1, 1].plot(t, s, **kw)
     ax[1, 2].plot(t, ye, **kw)
 for a, yl in zip(ax.flat, ["r (km)", "phi (deg)", "theta (deg)",
-                           r"$\rho$ (g/cm$^3$)", "T (GK)", r"$Y_e$"]):
+                           r"$\rho r^3$ ($M_\odot$)", r"s ($k_{\rm B}$)", r"$Y_e$"]):
     a.set_xlabel("time (ms)")
     a.set_ylabel(yl)
 ax[1, 0].set_yscale("log")
+ax[1, 1].set_yscale("log")
 plt.colorbar(plt.cm.ScalarMappable(norm=theta_norm, cmap=cmap), label="theta (deg)", ax=ax[0, 2])
 plt.gca().set_rasterization_zorder(-1)
 plt.savefig(f"{OUTPUT_PATH}/test_traj.png", dpi=300, bbox_inches="tight")

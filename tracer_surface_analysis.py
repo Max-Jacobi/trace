@@ -32,9 +32,7 @@ parser.add_argument("-s", "--isurf", default=1, type=int,
                     help="Index of surface to use")
 parser.add_argument("-r", "--irad", default=0, type=int,
                     help="Index of radius to use")
-parser.add_argument("-n", "--irad_norm", default=0, type=int,
-                    help="Index of radius to use for normalisation of tracer masses")
-parser.add_argument("-p", "--ncpu", default=1, type=int,
+parser.add_argument("-n", "--ncpu", default=1, type=int,
                     help="Number of cores to use")
 parser.add_argument("-v", "--verbose", action="store_true",
                     help="Print progress")
@@ -84,22 +82,6 @@ mtot = np.cumsum(mdot * s.dts)
 
 ################################################################################
 
-s_norm = Surfaces(
-    paths,
-    args.isurf,
-    args.irad_norm,
-    n_cpu=args.ncpu,
-    verbose=args.verbose,
-    )
-
-data_norm = s_norm.process_h5_parallel((mdot_sf,), ordered=True)
-mdot_norm = np.array([d[0] for d in data_norm])
-
-mtot_norm = np.cumsum(mdot_norm * s_norm.dts)
-
-################################################################################
-
-
 files = []
 for path in args.tracer_dirs:
     files += sorted(pl.Path(path).glob("tracer_*"))
@@ -141,27 +123,6 @@ for i, tracer in enumerate(tqdm(
         last_i = n - 1 - np.argmax(t_msk[::-1])
         tr_r[last_i:, i] = tr_r[last_i, i]
 
-norm_mtot = np.array([np.sum(mm[r>=s_norm.r]) for r in tr_r])
-norm_mdot = np.zeros_like(norm_mtot)
-norm_mdot[1:] = np.diff(norm_mtot) / np.diff(times)
-
-n_s_mdot = np.interp(times, s_norm.times, mdot_norm)
-
-norm_fac = n_s_mdot / norm_mdot
-
-plt.plot(times, norm_fac)
-plt.yscale('log')
-plt.savefig(f"{args.outputpath}/mdot_fac.png", dpi=300)
-plt.close()
-
-done_msk = vol.copy()
-for it, f in enumerate(norm_fac):
-    if it == 0:
-        continue
-    msk = (tr_r[it-1] < s_norm.r) & (tr_r[it] >= s_norm.r) & (~done_msk) 
-    mm[msk] *= f
-    done_msk = done_msk | msk
-
 tr_mtot_vol = np.array([np.sum(mm[vol][r[vol]>=s.r]) for r in tr_r])
 tr_mtot_srf = np.array([np.sum(mm[srf][r[srf]>=s.r]) for r in tr_r])
 tr_mtot_vol += tr_mtot_srf
@@ -172,20 +133,22 @@ tr_mdot_vol[1:] = np.diff(tr_mtot_vol) / np.diff(times)
 tr_mdot_srf[1:] = np.diff(tr_mtot_srf) / np.diff(times)
 
 
-m = 5
-kern = np.ones(m)/m
-tr_mdot_vol = np.convolve(tr_mdot_vol, kern, mode='same')
-tr_mdot_srf = np.convolve(tr_mdot_srf, kern, mode='same')
+# m = 5
+# kern = np.ones(m)/m
+# tr_mdot_vol = np.convolve(tr_mdot_vol, kern, mode='same')
+# tr_mdot_srf = np.convolve(tr_mdot_srf, kern, mode='same')
 
 ################################################################################
 
 fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-ax[0].plot(s.times, mdot/tfac, label='surface')
-ax[1].plot(s.times, mtot, label='surface')
 ax[0].plot(times, tr_mdot_vol/tfac, label='tracers')
 ax[0].plot(times, tr_mdot_srf/tfac, label='surface tracers')
 ax[1].plot(times, tr_mtot_vol, label='tracers')
 ax[1].plot(times, tr_mtot_srf, label='surface tracers')
+
+ax[0].plot(s.times, mdot/tfac, label='surface', c='k')
+ax[1].plot(s.times, mtot, label='surface', c='k')
+
 ax[0].set_xlabel("time (ms)")
 ax[1].set_xlabel("time (ms)")
 ax[0].set_xlim(3200, 12000)
