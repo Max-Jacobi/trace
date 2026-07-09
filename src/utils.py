@@ -1,9 +1,56 @@
-from multiprocessing import Pool
+from contextlib import contextmanager
+from multiprocessing import Pool, get_context
 from itertools import count, repeat
 from sys import stdout
 from typing import Optional, Callable, Iterable
 from tqdm import tqdm
 import atexit
+
+# Workers that only attach to shared memory owned by the main process rely
+# on inheriting the calling module's already-computed state via
+# copy-on-fork; "fork" is forced explicitly so this holds regardless of the
+# platform/Python default start method (e.g. "forkserver", whose workers
+# are spawned from a server process snapshotted independently of the
+# calling module's import-time state).
+_MP_CONTEXT = get_context("fork")
+
+
+def close_pool_gracefully(pool: Pool) -> None:
+    """
+    Shut a ``Pool`` down gracefully (``close()`` + ``join()``), falling back
+    to an immediate ``terminate()`` if that raises -- including
+    ``KeyboardInterrupt`` from Ctrl-C, so an impatient user can force a fast
+    shutdown rather than waiting for in-flight tasks to finish, and a stuck
+    pool can't hang the calling process forever.
+
+    ``terminate()`` (used unconditionally by plain ``Pool.__exit__``/typical
+    ad-hoc cleanup) kills workers immediately (SIGTERM) before they reach
+    normal interpreter shutdown, which is what runs the ``__del__``-triggered
+    ``unload()`` on each worker's cached (attached) ``SharedMemory`` handles
+    -- skipping it leaves them registered with the resource tracker, which
+    complains about "leaked" shared memory at exit even though the memory
+    itself was already cleaned up by its owner.
+    """
+    try:
+        pool.close()
+        pool.join()
+    except BaseException:
+        pool.terminate()
+        pool.join()
+
+
+@contextmanager
+def worker_pool(n_cpu: Optional[int] = None, initializer=None, initargs=()):
+    """
+    Create a ``Pool`` (forced ``fork`` start method) as a context manager
+    that shuts down via ``close_pool_gracefully`` on exit instead of the
+    default ``Pool.__exit__``'s ``terminate()``.
+    """
+    pool = _MP_CONTEXT.Pool(n_cpu, initializer=initializer, initargs=initargs)
+    try:
+        yield pool
+    finally:
+        close_pool_gracefully(pool)
 
 def _pack_args(args_list, func):
     """Normalize mixed positional and keyword call specifications."""

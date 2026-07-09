@@ -52,12 +52,23 @@ class InterpolatorBase(ABC):
     def __del__(self):
         self.unload()
 
-    def load(self):
+    def load(self, track: bool = True):
         """
         Open the shared-memory segments and expose their data arrays.
+
+        Parameters
+        ----------
+        track : bool, optional
+            Whether to register the opened segments with the multiprocessing
+            resource tracker.  Pass ``False`` when this instance only
+            attaches to memory owned (created and eventually unlinked) by
+            another process -- e.g. a worker process that just reads a
+            snapshot built by the main process -- so the resource tracker
+            doesn't report a spurious "leak" for handles this process was
+            never responsible for unlinking.
         """
         for key in self.keys:
-            shm = SharedMemory(name=self.shm_names[key])
+            shm = SharedMemory(name=self.shm_names[key], track=track)
             self.shm[key] = shm
             self.data[key] = np.ndarray(self.shape, dtype=np.float64, buffer=shm.buf)
         self.loaded = True

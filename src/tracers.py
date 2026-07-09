@@ -11,7 +11,7 @@ from multiprocessing import Pool
 
 from .integrators.base import IntegratorBase, InterpolatorCallable
 from .file import FileHandler
-from .utils import do_parallel_star, do_parallel_star_pool
+from .utils import do_parallel_star, do_parallel_star_pool, close_pool_gracefully
 
 # ---------------------------------------------------------------------------
 # Worker-process globals - set once by _init_worker_persistent, then updated
@@ -220,8 +220,7 @@ class Tracers:
 
     def __del__(self) -> None:
         if getattr(self, "_pool", None) is not None:
-            self._pool.terminate()
-            self._pool.join()
+            close_pool_gracefully(self._pool)
 
     def integrate_loaded_chunk(self) -> None:
         """Integrate all active tracers across the currently loaded snapshot chunk."""

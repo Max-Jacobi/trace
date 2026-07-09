@@ -71,9 +71,9 @@ class RegularInterpolator3D(InterpolatorBase):
         self._y_nodes = np.asarray(y)
         self._z_nodes = np.asarray(z)
 
-    def load(self):
+    def load(self, track: bool = True):
         """Build cached SciPy interpolators for the loaded field arrays."""
-        super().load()
+        super().load(track=track)
         for k, dd in self.data.items():
             self.interp_cache[k] = RegularGridInterpolator(
                 (self._x_nodes, self._y_nodes, self._z_nodes),

@@ -48,8 +48,8 @@ class CartesianToSpherical(InterpolatorBase):
         phi_bins = np.digitize(phi, self.interpolator._z_nodes)
         return tracers[np.lexsort((phi_bins, theta_bins))]
 
-    def load(self):
-        self.interpolator.load()
+    def load(self, track: bool = True):
+        self.interpolator.load(track=track)
 
     def unload(self):
         self.interpolator.unload()
