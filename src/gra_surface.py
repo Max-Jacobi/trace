@@ -169,7 +169,7 @@ class GRASurfaceFileHandler(FileHandler):
             interpolator, r, th, phi,
             shm=shared_memory,
             log_coords=log_coords,
-            shape=extra_data['shape']
+            shape=extra_data['shape'],
             **extra_data.get("interpolator_kwargs", {}),
         )
         return interpolator
