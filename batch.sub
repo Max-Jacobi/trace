@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH -A PHY23001
+#SBATCH --partition small
+#SBATCH -t 12:00:00
+#SBATCH --cpus-per-task=1
+#SBATCH -N 1 --ntasks-per-node=56
+#SBATCH -J tracers
+#SBATCH -o tracers.out
+#SBATCH -e tracers.err
+#SBATCH --mem=0  
+#SBATCH --exclusive
+
+# Edit the arguments below for your run -- see README.md ("Running on a
+# cluster (SLURM)") for what each one does and how to pick values.
+python run_pipeline.py \
+    --data-dir data/transformed \
+    --output-dir data/tracers_out \
+    --start-t 11600 --end-t 0 \
+    --n-cpu "$SLURM_NTASKS_PER_NODE" \
+    volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
