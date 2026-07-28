@@ -187,11 +187,18 @@ def spherical_by_volume(
     **kwargs
     ) -> Tracers:
     """
-    Seed tracers in spherical cells with equal represented volume per tracer.
+    Seed tracers in spherical cells built for roughly equal represented mass
+    (not volume) under a typical homologous outflow.
 
     Radial bins are geometrically spaced, phi bins are uniformly spaced, and
     theta bins are built from equally spaced ``cos(theta)`` edges so each
-    angular strip spans equal solid angle.
+    angular strip spans equal solid angle. Geometric radial spacing makes
+    cell volume grow as ``r**3`` outward (``dr`` grows with ``r``, and
+    ``dV ~ r**2 * dr``), which roughly cancels a homologous outflow's
+    ``rho ~ r**-3`` density falloff -- giving tracers of roughly equal mass,
+    not equal volume. Each tracer's actual mass is still integrated from the
+    density field directly (see ``density_key``), so this holds only
+    approximately and only for flows resembling that density profile.
 
     Parameters
     ----------

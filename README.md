@@ -12,8 +12,10 @@ This document is a practical guide for *running* the tool: preparing
 input data, invoking the pipeline, understanding every command-line
 option, reading the output back, and running at scale on a cluster. For
 the internals (module layout, class responsibilities) see the section
-["How it fits together"](#how-it-fits-together) below, and for the test
-suite / exploratory examples see `tests/README.md` and `examples/README.md`.
+["How it fits together"](#how-it-fits-together) below; for the test suite
+and exploratory examples see `tests/README.md` and `examples/README.md`;
+and for post-processing real tracer output (plots, animations, mass-budget
+checks) see [Analysis scripts](#analysis-scripts) and `analysis/README.md`.
 
 ## Contents
 
@@ -31,8 +33,9 @@ suite / exploratory examples see `tests/README.md` and `examples/README.md`.
 - [Step 3: read the output](#step-3-read-the-output)
 - [Running on a cluster (SLURM)](#running-on-a-cluster-slurm)
 - [Choosing options: a tuning guide](#choosing-options-a-tuning-guide)
+  - [Matching cell shapes and masses between `volume` and `surface`](#matching-cell-shapes-and-masses-between-volume-and-surface)
 - [Units](#units)
-- [Other scripts in this repo](#other-scripts-in-this-repo)
+- [Analysis scripts](#analysis-scripts)
 - [How it fits together](#how-it-fits-together)
 - [Tests and examples](#tests-and-examples)
 - [Troubleshooting](#troubleshooting)
@@ -42,13 +45,22 @@ suite / exploratory examples see `tests/README.md` and `examples/README.md`.
 - Python 3.10+
 - `numpy`, `scipy`, `h5py`, `tqdm` (core pipeline)
 - `matplotlib` (only needed for the plotting/analysis scripts, not for
-  `run_pipeline.py` itself)
+  `run_pipeline.py` itself; install with the `plots` extra below)
 
-There's no `requirements.txt`/`pyproject.toml` yet -- install the above
-with pip/conda into whatever environment you run this from. No package
-install step is otherwise required: everything is run directly from the
-repo root (scripts do `from src...` imports, so always run them with the
-repo root as your working directory, or with it on `PYTHONPATH`).
+Install with:
+
+```bash
+pip install -e .            # core pipeline only
+pip install -e ".[plots]"   # + matplotlib, for analysis/ and examples/
+```
+
+This is an editable install (`pyproject.toml`), so it picks up local edits
+immediately and puts `src`, `analysis`, and `examples` all on your import
+path permanently -- no `PYTHONPATH` juggling needed afterward, from any
+directory. If you'd rather not install anything, everything also runs
+directly from the repo root without it: just make sure the repo root is
+your working directory, or is on `PYTHONPATH`, when invoking any script
+(`run_pipeline.py`, anything under `analysis/`, `examples/`, etc.).
 
 ## Quick start
 
@@ -196,10 +208,15 @@ close to the launch radius of a disk wind).
 
 Seeds tracers throughout a spherical shell, with one tracer per
 `(r, theta, phi)` cell on a grid that's geometrically spaced in `r` and
-equal-solid-angle in `(theta, phi)`, so every tracer represents
-approximately the same cell volume. Each tracer's represented mass is
-computed once at `--start-t` by Gauss-Legendre-integrating `--density-key`
-over its cell.
+equal-solid-angle in `(theta, phi)`. Geometric radial spacing makes `dr`
+grow with `r`, so cell volume (`dV ~ r^2 dr`) grows as `r^3` outward, not
+constant -- by design, since a typical homologous outflow's density falls
+off as `rho ~ r^-3`, this `r^3` volume growth roughly cancels the density
+falloff, giving tracers of roughly equal *mass* rather than equal volume.
+Each tracer's represented mass is computed once at `--start-t` by
+Gauss-Legendre-integrating `--density-key` over its actual cell (not
+assumed from the grid alone), so this holds only approximately, and only
+insofar as your flow actually resembles that `rho ~ r^-3` profile.
 
 ```bash
 python run_pipeline.py --data-dir ... --output-dir ... --start-t ... --end-t ... \
@@ -281,10 +298,9 @@ tr.data["rho"]       # ndarray, density history
 tr.data["time"]      # ndarray, matching time values
 ```
 
-`plot_test.py`, `tracer_surface_analysis.py`, and `animate_tracer.py` at
-the repo root are all worked examples of loading many `Trajectory` objects
-this way and building plots/animations/mass budgets from them (see
-[Other scripts in this repo](#other-scripts-in-this-repo)).
+`analysis/` (see [Analysis scripts](#analysis-scripts) below) has worked,
+argparse-driven examples of loading many `Trajectory` objects this way and
+building plots/animations/mass budgets from them.
 
 ## Running on a cluster (SLURM)
 
@@ -340,12 +356,24 @@ snapshot data is staged in `/dev/shm` (shared memory), not process heap
   features (shocks, ejecta edges); `regular` with `--interp-method linear`
   for speed on smooth fields, or when you need a specific
   `RegularGridInterpolator` method for comparison.
-- **`volume` vs `surface` seeding?** `volume` gives you a fixed population
-  of tracers whose full history you integrate over the whole time range --
-  natural for "what happened to the ejecta that ends up unbound".
-  `surface` continuously injects new tracers as material crosses a given
-  radius -- natural for "what is the time- and angle-resolved mass/flux
-  budget crossing this surface".
+- **`volume` and `surface` seeding are complementary, not alternatives.**
+  The usual goal is to capture *all* the matter that ends up ejected by
+  integrating backward from a late time. At that late `--start-t`, the
+  ejecta splits into two populations: matter still inside the simulation
+  domain (out to some outer radius `R`), and matter that has already left
+  it (crossed `R` at some earlier time and kept going). `volume` seeded
+  out to `--r-max R` catches the first population, once, at `--start-t`.
+  `surface` seeded at `--r-surf R`, with a time range covering everything
+  *before* `--start-t`, catches the second population at the moment each
+  parcel crossed `R` -- which is exactly the information `volume` seeding
+  can't see, since that matter is no longer inside `[--r-min, --r-max]` by
+  `--start-t` to be caught by it. Run both against the same `R`, then
+  integrate each backward from its own seed time; together they cover the
+  ejecta without double-counting (a given parcel is either still inside at
+  `--start-t`, or already crossed -- never both). See
+  [Matching cell shapes and masses between `volume` and `surface`](#matching-cell-shapes-and-masses-between-volume-and-surface)
+  for how to size the two grids so they combine into one consistent
+  tracer population.
 - **`--n-cpu` / `--files-per-step`**: more snapshots resident at once
   means fewer, larger I/O passes but more `/dev/shm` usage (which scales
   with `--files-per-step x number of --keys x per-snapshot field size`,
@@ -363,29 +391,113 @@ snapshot data is staged in `/dev/shm` (shared memory), not process heap
   explicitly if you have headroom and are seeding a very large number of
   tracers spread across many grid columns.
 
+### Matching cell shapes and masses between `volume` and `surface`
+
+Since `volume` and `surface` are meant to be run together against the
+same transition radius `R` (see above), it's worth sizing both grids so
+the combined tracer population is reasonably uniform: roughly cubical
+cells (no long, thin slivers that make one direction of the flow
+under-resolved relative to the others), and roughly similar mass per
+tracer whether it came from the `volume` or the `surface` half of the run
+(so downstream analysis isn't implicitly weighting one population more
+than the other).
+
+**Cubical `volume` cells.** `--n-r`'s bins are geometrically spaced, so
+the fractional radial step is constant:
+
+```
+Δ = ln(r_max / r_min) / n_r
+```
+
+and a cell's physical radial extent is `dr = r * Δ`. `--n-th`'s bins are
+equally spaced in `cos(theta)`, so the angular step at a given `theta` is
+`dtheta = (cos(theta_min) - cos(theta_max)) / (n_th * sin(theta))` -- its
+physical (arc-length) extent is `r * dtheta`. `--n-ph`'s bins are equally
+spaced in `phi`, giving physical extent `r * sin(theta) * dphi` with
+`dphi = (phi_max - phi_min) / n_ph`. For a cell at a reference colatitude
+`theta_ref` (pick the middle of your `--theta-min-deg`/`--theta-max-deg`
+range, or 90 degrees/the equator for a disk-like geometry) to come out
+roughly cubical, all three physical extents should match `r * Δ`, which
+gives:
+
+```
+n_th ~ (cos(theta_min) - cos(theta_max)) / (Δ * sin(theta_ref))
+n_ph ~ sin(theta_ref) * (phi_max - phi_min) / Δ
+```
+
+(Note this can't be made exact at every latitude simultaneously with a
+single global `--n-th`/`--n-ph` -- the equal-`cos(theta)` spacing that
+keeps solid angle per cell constant necessarily makes cells anisotropic
+near the poles, since `dtheta` grows while `sin(theta)` shrinks there.
+The formulas above match cell shape at your chosen `theta_ref`, which is
+the right thing to optimize for if your ejecta of interest is
+concentrated away from the poles, as it usually is for disk-wind/BNS
+merger geometries.)
+
+*Worked example:* full sphere (`theta_min=0`, `theta_max=180`, so
+`cos(theta_min) - cos(theta_max) = 2`; `phi_min=0`, `phi_max=360`, so
+`phi_max - phi_min = 2*pi`), `theta_ref = 90` degrees (`sin = 1`),
+`--r-min 300 --r-max 1000 --n-r 30` gives `Δ = ln(1000/300)/30 ≈ 0.0401`.
+Then `n_th ~ 2 / 0.0401 ≈ 50` and `n_ph ~ 2*pi / 0.0401 ≈ 157`.
+
+**Matching `surface` tracer mass to `volume` tracer mass.** A `volume`
+cell at the transition radius `R` with side length `ell = R * Δ` (from
+above) represents mass `dm_volume ~ rho * ell**3`. A `surface` tracer's
+angular cell, built with the *same* `Δ` so its footprint matches the
+`volume` cell's angular footprint (i.e. `--n-th`/`--n-ph` computed the
+same way, evaluated at `r = R`), has area `dA ~ ell**2`; over one time
+slot of duration `dt_slot` it represents mass
+`dm_surface ~ rho * v_r * ell**2 * dt_slot`, where `v_r` is the typical
+radial velocity of material crossing `R`. Setting `dm_surface ~ dm_volume`
+gives:
+
+```
+dt_slot ~ ell / v_r
+```
+
+i.e. pick the surface time-slot duration so that material crossing `R`
+at its typical radial velocity covers about one cell-width `ell` per
+slot -- the same "cubical" intuition as the spatial grid, applied to
+time. Since slots are built from `--every-n-files` (an integer stride
+over your snapshot cadence `dt_file`), solve for the stride:
+
+```
+--every-n-files ~ round(dt_slot / dt_file) = round(ell / (v_r * dt_file))
+```
+
+(clamped to at least `1`). *Continuing the worked example:* `ell = R*Δ`
+with `R = 1000` (matching `--r-max` above) and `Δ ≈ 0.0401` gives
+`ell ≈ 40.1`; for ejecta crossing `R` at a typical `v_r ≈ 0.1` (both in
+geometric units, see [Units](#units)) and a snapshot cadence of
+`dt_file = 20`, `dt_slot ≈ 40.1/0.1 = 401`, so
+`--every-n-files ≈ round(401/20) ≈ 20`.
+
+Treat all of the above as a starting point, not a hard rule: measure your
+own simulation's characteristic `v_r` near `R` and its actual snapshot
+cadence, and adjust from there.
+
 ## Units
 
 `run_pipeline.py` doesn't do any unit conversion -- every length
 (`--r-min`, `--r-max`, `--r-surf`) and time (`--start-t`, `--end-t`) is in
 whatever units your snapshot files' `coordinates/r`/`coordinates/time`
 datasets use, which for GR-Athena++ output is geometric units with
-`G = c = M_sun = 1`. `plot_test.py` shows how to convert output back to
-physical units (km, ms, GK, CGS density) for plotting, via
+`G = c = M_sun = 1`. `analysis/` (below) shows how to convert output back
+to physical units (km, ms, GK, CGS density) for plotting, via
 `tabulatedEOS.unit_system.GeometricSolar`.
 
-## Other scripts in this repo
+## Analysis scripts
 
-These are personal/ad hoc analysis scripts built on top of the pipeline's
-output, not part of the documented CLI above -- read their source before
-relying on them, as they have hard-coded paths/parameters near the top
-that you'll need to edit for your own data:
-
-| Script | Purpose |
-|---|---|
-| `plot_test.py` | Loads two directories of tracer output with `Trajectory.from_ascii`, plots `r`, `theta`, `phi`, `rho*r^3`, entropy, and `Y_e` histories for a subsample of tracers. |
-| `tracer_surface_analysis.py` | Compares tracer-derived mass/mass-flux (volume- and surface-seeded) against a direct surface-flux diagnostic (`surface.Surfaces`). Needs the external `surface` and `tabulatedEOS` packages (not part of this repo). |
-| `animate_tracer.py` | Renders a 3-D animation (via `ffmpeg`) of tracer positions coloured by `Y_e` over time. Needs `ffmpeg` on `PATH`. |
-| `t_in_hist.py` | Small scratch script loading a directory of tracers with `Trajectory.from_ascii`. |
+`analysis/` has four argparse-driven post-processing scripts for real
+tracer output (as opposed to `examples/`'s synthetic-velocity-field
+validation scripts): plotting a random sample of tracer histories vs
+time, rendering a 3-D animation, checking the `volume`/`surface`
+mass-budget consistency discussed above, and a mass-weighted histogram
+panel of standard summary quantities (peak temperature, `Ye`/entropy/
+expansion-timescale at a reference temperature, final angle/radius/
+velocity, including the asymptotic velocity implied by the geodesic
+criterion when `u_t` is available). See `analysis/README.md` for full
+option documentation for each.
 
 `test.py` at the repo root is an old, hand-edited script that predates
 `run_pipeline.py` and served the same purpose (invoke the pipeline with a
