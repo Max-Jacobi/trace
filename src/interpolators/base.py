@@ -2,6 +2,51 @@ from abc import ABC, abstractmethod
 import numpy as np
 from multiprocessing.shared_memory import SharedMemory
 
+
+def transform_coords(coords, coord_transforms, context="Coordinate"):
+    """
+    Apply per-axis forward transforms to a sequence of coordinate arrays.
+
+    Parameters
+    ----------
+    coords : sequence of ndarray
+        One coordinate array per axis.
+    coord_transforms : dict[int, str | tuple] or None
+        Mapping from axis index to a transform spec:
+        ``"log"`` for ``log10``, or ``("asinh", scale)`` for
+        ``arcsinh(c / scale)`` where ``scale`` is the approximate
+        lin-log transition point.
+    context : str, optional
+        Prefix used in error messages (e.g. "Query coordinate").
+
+    Returns
+    -------
+    list of ndarray
+        Transformed coordinate arrays, same order as ``coords``.
+    """
+    out = []
+    for i, c in enumerate(coords):
+        c = np.asarray(c)
+        spec = (coord_transforms or {}).get(i)
+        if spec is None:
+            out.append(c)
+            continue
+        name, *params = (spec,) if isinstance(spec, str) else spec
+        if name == "log":
+            if np.any(c <= 0):
+                raise ValueError(
+                    f"{context} axis {i} contains non-positive values; "
+                    "log10 requires strictly positive inputs."
+                )
+            out.append(np.log10(c))
+        elif name == "asinh":
+            (scale,) = params
+            out.append(np.arcsinh(c / scale))
+        else:
+            raise ValueError(f"Unknown coordinate transform {name!r} for axis {i}.")
+    return out
+
+
 class InterpolatorBase(ABC):
     """
     Base class for interpolators backed by shared-memory field arrays.

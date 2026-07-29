@@ -137,9 +137,10 @@ class TestRegularInterpolator3D:
 
     def test_log_coords_x_axis(self):
         """
-        With log_coords=[0], x coordinates are transformed as log10(x) before
-        interpolation.  A field defined as f(log10(x), y, z) = log10(x) should
-        be reproduced exactly at node positions.
+        With coord_transforms={0: "log"}, x coordinates are transformed as
+        log10(x) before interpolation.  A field defined as
+        f(log10(x), y, z) = log10(x) should be reproduced exactly at node
+        positions.
         """
         x = np.array([1.0, 10.0, 100.0, 1000.0])
         y = np.linspace(0.0, 3.0, 4)
@@ -149,12 +150,38 @@ class TestRegularInterpolator3D:
         field = np.log10(xx).astype(np.float64)
         with shared_memory_arrays({'f': field}) as shm:
             interp = RegularInterpolator3D(
-                x, y, z, shm=shm, shape=field.shape, log_coords=[0]
+                x, y, z, shm=shm, shape=field.shape, coord_transforms={0: "log"}
             )
             interp.load()
             pts = np.array([[10.0], [1.5], [1.5]])
             vals = interp(pts)
             np.testing.assert_allclose(vals[0, 0], 1.0, rtol=1e-6)
+
+    def test_asinh_coords_x_axis(self):
+        """
+        With coord_transforms={0: ("asinh", scale)}, x coordinates are
+        transformed as arcsinh(x/scale) before interpolation.  Negative
+        coordinates are allowed, and a field defined as
+        f = arcsinh(x/scale) should be reproduced exactly mid-cell.
+        """
+        scale = 10.0
+        # Uniform in asinh-space, spanning negative and positive x.
+        u = np.linspace(-3.0, 3.0, 7)
+        x = scale * np.sinh(u)
+        y = np.linspace(0.0, 3.0, 4)
+        z = np.linspace(0.0, 3.0, 4)
+        xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
+        field = np.arcsinh(xx / scale).astype(np.float64)
+        with shared_memory_arrays({'f': field}) as shm:
+            interp = RegularInterpolator3D(
+                x, y, z, shm=shm, shape=field.shape,
+                coord_transforms={0: ("asinh", scale)},
+            )
+            interp.load()
+            xq = scale * np.sinh(0.5)  # mid-cell in transformed space
+            pts = np.array([[xq], [1.5], [1.5]])
+            vals = interp(pts)
+            np.testing.assert_allclose(vals[0, 0], 0.5, rtol=1e-6)
 
     def test_nonpositive_log_coord_raises_on_init(self):
         """Passing a coordinate with non-positive values for a log axis must raise."""
@@ -164,7 +191,17 @@ class TestRegularInterpolator3D:
         field = np.ones((3, 3, 3))
         with shared_memory_arrays({'f': field}) as shm:
             with pytest.raises(ValueError, match="log"):
-                RegularInterpolator3D(x, y, z, shm=shm, shape=(3, 3, 3), log_coords=[0])
+                RegularInterpolator3D(x, y, z, shm=shm, shape=(3, 3, 3),
+                                      coord_transforms={0: "log"})
+
+    def test_unknown_transform_raises(self):
+        """An unrecognized transform name must raise ValueError."""
+        x = np.array([0.0, 1.0, 2.0])
+        field = np.ones((3, 3, 3))
+        with shared_memory_arrays({'f': field}) as shm:
+            with pytest.raises(ValueError, match="Unknown coordinate transform"):
+                RegularInterpolator3D(x, x, x, shm=shm, shape=(3, 3, 3),
+                                      coord_transforms={0: "sqrt"})
 
     def test_shape_mismatch_raises(self):
         """Mismatched coordinate lengths and shape must raise ValueError."""

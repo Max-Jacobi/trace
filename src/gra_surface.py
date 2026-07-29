@@ -56,11 +56,12 @@ class GRASurfaceFileHandler(FileHandler):
         self,
         interpolator: type[InterpolatorBase],
         *args,
-        log_rad: bool = True,
+        rad_transform: str | tuple | None = "log",
         surface_num: int = 1,
         **kwargs
         ) -> None:
-        self.extra_data = {'interpolator': interpolator, 'log_rad': log_rad}
+        # rad_transform: spec for the radial axis: "log", ("asinh", scale), or None.
+        self.extra_data = {'interpolator': interpolator, 'rad_transform': rad_transform}
         self.n_ghosts = interpolator.n_ghosts
         self.surface_num = surface_num
         super().__init__(*args, **kwargs)
@@ -164,11 +165,12 @@ class GRASurfaceFileHandler(FileHandler):
         th = extra_data['th']
         phi = extra_data['ph']
         interpolator = extra_data['interpolator']
-        log_coords = [0] if extra_data['log_rad'] else []
+        spec = extra_data['rad_transform']
+        coord_transforms = {0: spec} if spec else {}
         interpolator = CartesianToSpherical(
             interpolator, r, th, phi,
             shm=shared_memory,
-            log_coords=log_coords,
+            coord_transforms=coord_transforms,
             shape=extra_data['shape'],
             **extra_data.get("interpolator_kwargs", {}),
         )

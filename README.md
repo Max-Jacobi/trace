@@ -177,7 +177,8 @@ tracer's (off-grid) location.
 | `--interpolator` | `pchip` | `pchip` (monotone cubic, `PchipInterpolator3D`) or `regular` (`RegularInterpolator3D`, wraps `scipy.interpolate.RegularGridInterpolator`). |
 | `--interp-method` | `linear` | Method passed through to `RegularGridInterpolator` when `--interpolator=regular`: `linear`, `nearest`, `slinear`, `cubic`, `quintic`, or `pchip`. Ignored for `--interpolator=pchip`. |
 | `--cache-size-gb` | auto | Max memory (GB) each PCHIP interpolator instance's internal cache of per-column 1-D interpolators may use before evicting the oldest entries. `--interpolator=pchip` only. If omitted, it's computed from `/proc/meminfo`'s free memory, `--n-cpu`, and the integrator's snapshot count (leaving an 80% safety margin) -- the computed value and its reasoning are printed at start-up. |
-| `--no-log-rad` | log-rad **on** | By default the radial coordinate is `log10`-transformed before interpolation (appropriate for the geometrically-spaced radial grids GR-Athena++ surface output uses). Pass `--no-log-rad` if your grid's radial spacing is already linear. |
+| `--rad-transform` | `log` | Coordinate transform applied to the radial axis before interpolation: `log` (`log10`, appropriate for the geometrically-spaced radial grids GR-Athena++ surface output uses), `asinh` (`arcsinh(r / scale)`, linear near the origin and logarithmic far out; requires `--rad-scale`), or `none` if your grid's radial spacing is already linear. |
+| `--rad-scale` | -- | Lin-log transition radius (code units) for `--rad-transform=asinh`: the approximate radius where the `arcsinh` scaling switches from linear to logarithmic behaviour. Required with `asinh`, ignored otherwise. |
 
 `pchip` (the default) guarantees the reconstructed field never overshoots
 between grid samples -- important near steep gradients (shock fronts,
@@ -517,8 +518,9 @@ run_pipeline.py                     (CLI entry point)
         |                           into shared memory, builds interpolators
         |
         +-- src/interpolators/      PchipInterpolator3D, RegularInterpolator3D
-        |                           (+ CartesianToSpherical wrapper, log-radius
-        |                           transform, shared-memory-backed field data)
+        |                           (+ CartesianToSpherical wrapper, radial
+        |                           log/asinh coordinate transforms,
+        |                           shared-memory-backed field data)
         |
         +-- src/integrators/        ExplicitTrapezoid, ImplicitTrapezoid, RK4
         |                           (advance one tracer batch by one timestep,

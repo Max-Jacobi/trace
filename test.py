@@ -65,7 +65,6 @@ def main():
     file_handler = ReducedSurfaceFileHandler(
         interpolator=interpolator,
         directory=data_path,
-        log_rad=True,
         keys=keys,
         n_cpu=n_cpu,
         verbose=True,

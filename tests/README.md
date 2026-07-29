@@ -208,8 +208,10 @@ Grid: 6×6×6 on `[0, 5]^3` with `RegularGridInterpolator` (SciPy, linear).
 | `test_multiple_keys` | Two-key dict `{'f1', 'f2'}` returns shape `(2, n_pts)`; both fields correct |
 | `test_raises_without_load` | Calling `__call__` before `load()` raises `RuntimeError` |
 | `test_load_unload_cycle` | `load` sets `loaded=True`; `unload` clears it and the interp cache |
-| `test_log_coords_x_axis` | With `log_coords=[0]` and `x=[1, 10, 100, 1000]`, field `f=log10(x)` is reproduced at query `x=10` |
+| `test_log_coords_x_axis` | With `coord_transforms={0: "log"}` and `x=[1, 10, 100, 1000]`, field `f=log10(x)` is reproduced at query `x=10` |
+| `test_asinh_coords_x_axis` | With `coord_transforms={0: ("asinh", 10.0)}` on an asinh-uniform grid spanning negative `x`, field `f=arcsinh(x/10)` is reproduced mid-cell |
 | `test_nonpositive_log_coord_raises_on_init` | Coordinate axis with `x=-1` for a log axis raises `ValueError` during construction |
+| `test_unknown_transform_raises` | Unrecognized transform name (`"sqrt"`) raises `ValueError` during construction |
 | `test_shape_mismatch_raises` | Coord lengths `(2,2,2)` but `shape=(3,3,3)` raises `ValueError` |
 | `test_mismatched_query_coords_raise` | Query with `xi.shape=(3,)` but `yi.shape=(1,)` raises `ValueError` |
 

@@ -3,14 +3,14 @@
 from scipy.interpolate import RegularGridInterpolator
 import numpy as np
 
-from .base import InterpolatorBase
+from .base import InterpolatorBase, transform_coords
 
 class RegularInterpolator3D(InterpolatorBase):
     """
     Wrap ``scipy.interpolate.RegularGridInterpolator`` for 3-D Cartesian data.
 
     Linear interpolation is used by default, and selected coordinate axes can
-    be transformed with ``log10`` before interpolation.
+    be transformed (``log10`` or ``arcsinh``) before interpolation.
     """
     n_ghosts = 1
 
@@ -19,7 +19,7 @@ class RegularInterpolator3D(InterpolatorBase):
         *coords: np.ndarray,
         shm: dict[str, str],
         shape: tuple[int, int, int],
-        log_coords: list[int] = [],
+        coord_transforms: dict | None = None,
         method: str = "linear",
         ):
         """
@@ -33,30 +33,19 @@ class RegularInterpolator3D(InterpolatorBase):
             Mapping from field keys to shared-memory segment names.
         shape : tuple[int, int, int]
             Shape of each field array stored in shared memory.
-        log_coords : list[int], optional
-            Indices of coordinate axes that should be transformed with
-            ``log10`` before interpolation.
+        coord_transforms : dict[int, str | tuple], optional
+            Per-axis coordinate transforms applied before interpolation:
+            ``"log"`` or ``("asinh", scale)``. See
+            :func:`~.base.transform_coords`.
         method : str, optional
             Interpolation method passed to ``RegularGridInterpolator``.
         """
         super().__init__(shm_names=shm, shape=shape)
-        self.log_coords = log_coords
+        self.coord_transforms = coord_transforms
         self.method = method
         self.interp_cache = {}  # initialised early so __del__ is safe on failed init
 
-        transformed = []
-        for i, c in enumerate(coords):
-            c = np.asarray(c)
-            if i in log_coords:
-                if np.any(c <= 0):
-                    raise ValueError(
-                        f"Coordinate axis {i} contains non-positive values but log_coords={log_coords}; "
-                        "log10 requires strictly positive inputs."
-                    )
-                transformed.append(np.log10(c))
-            else:
-                transformed.append(c)
-        x, y, z = transformed
+        x, y, z = transform_coords(coords, coord_transforms)
 
         self.nx = x.shape[0]
         self.ny = y.shape[0]
@@ -93,18 +82,7 @@ class RegularInterpolator3D(InterpolatorBase):
         if not self.loaded:
             raise RuntimeError("Interpolator data not loaded; call load() before querying.")
 
-        transformed = []
-        for i, c in enumerate(coords):
-            c = np.asarray(c)
-            if i in self.log_coords:
-                if np.any(c <= 0):
-                    raise ValueError(
-                        f"Query coordinate axis {i} contains non-positive values but log_coords={self.log_coords}."
-                    )
-                transformed.append(np.log10(c))
-            else:
-                transformed.append(c)
-        xi, yi, zi = transformed
+        xi, yi, zi = transform_coords(coords, self.coord_transforms, context="Query coordinate")
         if xi.shape != yi.shape or xi.shape != zi.shape:
             raise ValueError(
                 f"Coordinate arrays must have identical shapes; got {xi.shape}, {yi.shape}, {zi.shape}."

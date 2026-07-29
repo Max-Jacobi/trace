@@ -95,8 +95,11 @@ def parse_args() -> argparse.Namespace:
                                help="Max cache size per PCHIP x-interpolator (--interpolator=pchip only). "
                                     "Default: auto-computed from free memory, --n-cpu, and the integrator's "
                                     "snapshot count.")
-    interp_group.add_argument('--no-log-rad', action='store_false', dest='log_rad', default=True,
-                               help="Disable log10-transforming the radial coordinate before interpolation.")
+    interp_group.add_argument('--rad-transform', choices=['log', 'asinh', 'none'], default='log',
+                               help="Coordinate transform applied to the radial axis before interpolation. "
+                                    "'asinh' requires --rad-scale.")
+    interp_group.add_argument('--rad-scale', type=float, default=None,
+                               help="Lin-log transition radius for --rad-transform=asinh (code units).")
 
     integ_group = parser.add_argument_group("integrator")
     integ_group.add_argument('--integrator', choices=['expl_trap', 'impl_trap', 'rk4'], default='impl_trap',
@@ -147,7 +150,10 @@ def parse_args() -> argparse.Namespace:
     surface.add_argument('--every-n-files', type=int, default=1,
                           help="Build one time slot every Nth snapshot between --start-t and --end-t.")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.rad_transform == 'asinh' and args.rad_scale is None:
+        parser.error("--rad-transform=asinh requires --rad-scale")
+    return args
 
 
 def auto_cache_size_gb(n_cpu: int, integrator_name: str) -> float:
@@ -199,6 +205,13 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
     elif files_per_step is None:
         files_per_step = 10
 
+    if args.rad_transform == 'asinh':
+        rad_transform = ('asinh', args.rad_scale)
+    elif args.rad_transform == 'log':
+        rad_transform = 'log'
+    else:
+        rad_transform = None
+
     return ReducedSurfaceFileHandler(
         interpolator=interpolator_cls,
         directory=args.data_dir,
@@ -207,7 +220,7 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
         files_per_step=files_per_step,
         max_tot_memory=max_tot_memory,
         verbose=args.verbose,
-        log_rad=args.log_rad,
+        rad_transform=rad_transform,
         file_pattern=args.file_pattern,
         interpolator_kwargs=interpolator_kwargs,
     )

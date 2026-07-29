@@ -8,7 +8,7 @@ from scipy.interpolate import PchipInterpolator
 from collections import defaultdict
 from multiprocessing.shared_memory import SharedMemory
 
-from .base import InterpolatorBase
+from .base import InterpolatorBase, transform_coords
 
 
 def _pchip4_eval(nodes: np.ndarray, values: np.ndarray, query: np.ndarray) -> np.ndarray:
@@ -84,8 +84,8 @@ class PchipInterpolator3D(InterpolatorBase):
     The interpolator uses a lazy cache of x-direction
     ``scipy.interpolate.PchipInterpolator`` objects keyed by ``(iy, iz)``
     index pairs. Query evaluation proceeds sequentially along ``x``, then
-    ``y``, then ``z``, and selected coordinate axes may be transformed with
-    ``log10`` before interpolation.
+    ``y``, then ``z``, and selected coordinate axes may be transformed
+    (``log10`` or ``arcsinh``) before interpolation.
     """
     n_ghosts = 3
 
@@ -94,7 +94,7 @@ class PchipInterpolator3D(InterpolatorBase):
         *coords: np.ndarray,
         shm: dict[str, str],
         shape: tuple[int, int, int],
-        log_coords: list[int] = [],
+        coord_transforms: dict | None = None,
         max_cache_size_GB: float = 0.5,
         ):
         """
@@ -108,30 +108,19 @@ class PchipInterpolator3D(InterpolatorBase):
             Mapping from field keys to shared-memory segment names.
         shape : tuple[int, int, int]
             Shape of each field array stored in shared memory.
-        log_coords : list[int], optional
-            Indices of coordinate axes that should be transformed with
-            ``log10`` before interpolation.
+        coord_transforms : dict[int, str | tuple], optional
+            Per-axis coordinate transforms applied before interpolation:
+            ``"log"`` or ``("asinh", scale)``. See
+            :func:`~.base.transform_coords`.
         max_cache_size_GB : float, optional
             Approximate upper bound for the cached x-interpolator memory usage.
         """
         super().__init__(shm_names=shm, shape=shape)
 
-        self.log_coords = log_coords
+        self.coord_transforms = coord_transforms
         self.max_cache_size_bytes = int(max_cache_size_GB * 1024**3)
 
-        transformed = []
-        for i, c in enumerate(coords):
-            c = np.asarray(c)
-            if i in log_coords:
-                if np.any(c <= 0):
-                    raise ValueError(
-                        f"Coordinate axis {i} contains non-positive values but log_coords={log_coords}; "
-                        "log10 requires strictly positive inputs."
-                    )
-                transformed.append(np.log10(c))
-            else:
-                transformed.append(c)
-        x, y, z = transformed
+        x, y, z = transform_coords(coords, coord_transforms)
 
         self.nx = x.shape[0]
         self.ny = y.shape[0]
@@ -193,18 +182,7 @@ class PchipInterpolator3D(InterpolatorBase):
         if not self.loaded:
             raise RuntimeError("Interpolator data not loaded; call load() before querying.")
 
-        transformed = []
-        for i, c in enumerate(coords):
-            c = np.asarray(c)
-            if i in self.log_coords:
-                if np.any(c <= 0):
-                    raise ValueError(
-                        f"Query coordinate axis {i} contains non-positive values but log_coords={self.log_coords}."
-                    )
-                transformed.append(np.log10(c))
-            else:
-                transformed.append(c)
-        xi, yi, zi = transformed
+        xi, yi, zi = transform_coords(coords, self.coord_transforms, context="Query coordinate")
 
         if xi.shape != yi.shape or xi.shape != zi.shape:
             raise ValueError(
