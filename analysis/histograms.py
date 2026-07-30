@@ -68,7 +68,8 @@ def _reference_values(traj, t_ref_gk: float, Tfac: float) -> tuple:
     T = traj.data['T'] * Tfac
     i_hot = np.argmax(T)
     T_after = T[i_hot:]
-    if T_after.min() > t_ref_gk or T_after.max() < t_ref_gk:
+    # size guard: np.gradient needs >=2 points; chained comparison is False for NaN T
+    if T_after.size < 2 or not (T_after.min() <= t_ref_gk <= T_after.max()):
         return np.nan, np.nan, np.nan
 
     time_after = traj.data['time'][i_hot:]
