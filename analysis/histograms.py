@@ -19,6 +19,7 @@ Example
 """
 
 import argparse
+import pathlib as pl
 
 import numpy as np
 import matplotlib
@@ -47,6 +48,10 @@ def parse_args() -> argparse.Namespace:
                               "timescale are sampled -- typical literature values are 5-6 GK.")
     parser.add_argument('--panels', nargs='+', default=list(ALL_PANELS), choices=list(ALL_PANELS),
                          help="Which panels to include.")
+    parser.add_argument('--r-ref-km', type=float, nargs='+', default=[],
+                         help="Reference radii in km. For each, an extra figure is written with Ye, s, T, "
+                              "|v| (coordinate + asymptotic), theta and phi sampled at the time each tracer "
+                              "first crosses outward through that radius.")
     parser.add_argument('--bins', type=int, default=40, help="Number of histogram bins per panel.")
     parser.add_argument('--output', default='histograms.png', help="Output image path.")
     parser.add_argument('--dpi', type=int, default=300, help="Output image DPI.")
@@ -79,6 +84,87 @@ def _reference_values(traj, t_ref_gk: float, Tfac: float) -> tuple:
     s_ref = np.interp(t_ref_gk, T_rev, s_after[::-1])
     tau_ref = np.interp(t_ref_gk, T_rev, tau_after[::-1])
     return float(ye_ref), float(s_ref), float(tau_ref)
+
+
+def _crossing_time(traj, r_ref: float) -> float:
+    """
+    Time (code units) at which the tracer first crosses outward through
+    radius `r_ref` (code units), linearly interpolated between the two
+    samples bracketing the crossing. If the tracer already starts outside
+    `r_ref`, its first recorded time is returned; NaN if it never reaches
+    `r_ref`.
+    """
+    r, t = traj.data['r'], traj.data['time']
+    outside = r >= r_ref
+    if not outside.any():
+        return np.nan
+    i = int(np.argmax(outside))
+    if i == 0:
+        return float(t[0])
+    f = (r_ref - r[i - 1]) / (r[i] - r[i - 1])
+    return float(t[i - 1] + f * (t[i] - t[i - 1]))
+
+
+def _values_at_radius(trajs: list, r_ref_code: float, keys: list) -> dict:
+    """Each key of traj.data interpolated to the tracer's outward crossing of r_ref_code; NaN if it never crosses."""
+    out = {k: np.full(len(trajs), np.nan) for k in keys}
+    for j, tr in enumerate(trajs):
+        t_c = _crossing_time(tr, r_ref_code)
+        if not np.isfinite(t_c):
+            continue
+        for k in keys:
+            out[k][j] = np.interp(t_c, tr.data['time'], tr.data[k])
+    return out
+
+
+def _velocity_panel(ax, v_coord, v_inf_geo, v_inf_bernoulli, masses, total_mass, bins, coord_label) -> None:
+    """Overlaid mass-weighted histograms of coordinate |v| and the (optional) asymptotic velocities."""
+    for v, label in ((v_coord, coord_label),
+                     (v_inf_geo, "asymptotic (geodesic)"),
+                     (v_inf_bernoulli, "asymptotic (Bernoulli)")):
+        if v is None:
+            continue
+        finite = np.isfinite(v)
+        if finite.any():
+            mass_frac = 100 * masses[finite].sum() / total_mass
+            ax.hist(v[finite], bins=bins, weights=masses[finite],
+                    histtype="step", label=f"{label}, {mass_frac:.1f}% of mass")
+    ax.set_xlabel(r"$|v|$ (c)")
+    ax.legend(fontsize=7)
+
+
+def _radius_figure(trajs, masses, total_mass, r_ref_km, units, bins):
+    """Histogram figure of Ye, s, T, |v|, theta, phi sampled where tracers cross r_ref_km."""
+    keys = ['r_0', 's', 'T', 'theta', 'phi', 'V_u_x', 'V_u_y', 'V_u_z']
+    keys += [k for k in ('u_t', 'hu_t') if k in trajs[0].data]
+    vals = _values_at_radius(trajs, r_ref_km / units.length_km, keys)
+
+    n_missed = np.sum(~np.isfinite(vals['T']))
+    if n_missed:
+        print(f"r_ref={r_ref_km:g} km: {n_missed} of {len(trajs)} tracers never reach that radius "
+              f"({100 * masses[~np.isfinite(vals['T'])].sum() / total_mass:.2f}% of mass; excluded).")
+
+    v_coord = np.sqrt(vals['V_u_x']**2 + vals['V_u_y']**2 + vals['V_u_z']**2)
+    v_inf_geo = asymptotic_velocity(-vals['u_t']) if 'u_t' in vals else None
+    v_inf_bernoulli = asymptotic_velocity(-vals['hu_t']) if 'hu_t' in vals else None
+
+    panels = [
+        (vals['r_0'], rf"$Y_e$ at {r_ref_km:g} km", False),
+        (vals['s'], rf"$s$ at {r_ref_km:g} km ($k_{{\rm B}}$)", False),
+        (vals['T'] * units.temperature_gk, rf"$T$ at {r_ref_km:g} km (GK)", False),
+        (vals['theta'], rf"$\theta$ at {r_ref_km:g} km (deg)", False),
+        (vals['phi'] % 360, rf"$\phi$ at {r_ref_km:g} km (deg)", False),
+    ]
+    fig, ax = plt.subplots(2, 3, figsize=(12, 6.6), squeeze=False)
+    ax_flat = ax.flatten()
+    for a, (values, label, log) in zip(ax_flat, panels):
+        _mass_weighted_hist(a, values, masses, bins, label, log)
+    _velocity_panel(ax_flat[len(panels)], v_coord, v_inf_geo, v_inf_bernoulli,
+                    masses, total_mass, bins, f"at {r_ref_km:g} km (coordinate)")
+    for a in ax_flat:
+        a.set_ylabel(r"$\Delta m$ ($M_\odot$)")
+    fig.tight_layout()
+    return fig
 
 
 def _mass_weighted_hist(ax, values: np.ndarray, masses: np.ndarray, bins: int, label: str, log: bool = False) -> None:
@@ -180,21 +266,8 @@ def main() -> None:
 
     for a, panel in zip(ax_flat, panels):
         if panel == 'v_final':
-            finite_v = np.isfinite(v_final)
-            mass_frac = 100 * masses[finite_v].sum() / total_mass
-            a.hist(v_final[finite_v], bins=args.bins, weights=masses[finite_v],
-                   histtype="step", label=f"final (coordinate), {mass_frac:.1f}% of mass")
-            for v_inf, style_label in ((v_inf_geo, "asymptotic (geodesic)"),
-                                        (v_inf_bernoulli, "asymptotic (Bernoulli)")):
-                if v_inf is None:
-                    continue
-                finite_vinf = np.isfinite(v_inf)
-                if finite_vinf.any():
-                    mass_frac = 100 * masses[finite_vinf].sum() / total_mass
-                    a.hist(v_inf[finite_vinf], bins=args.bins, weights=masses[finite_vinf],
-                           histtype="step", label=f"{style_label}, {mass_frac:.1f}% of mass")
-            a.set_xlabel(r"$|v|$ (c)")
-            a.legend(fontsize=7)
+            _velocity_panel(a, v_final, v_inf_geo, v_inf_bernoulli,
+                            masses, total_mass, args.bins, "final (coordinate)")
             continue
         label, log = labels[panel]
         _mass_weighted_hist(a, panel_values[panel], masses, args.bins, label, log)
@@ -207,6 +280,14 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(args.output, dpi=args.dpi, bbox_inches="tight")
     print(f"Wrote {args.output}")
+
+    out = pl.Path(args.output)
+    for r_ref_km in args.r_ref_km:
+        r_fig = _radius_figure(trajs, masses, total_mass, r_ref_km, units, args.bins)
+        r_out = out.with_name(f"{out.stem}_r{r_ref_km:g}km{out.suffix}")
+        r_fig.savefig(r_out, dpi=args.dpi, bbox_inches="tight")
+        plt.close(r_fig)
+        print(f"Wrote {r_out}")
 
 
 if __name__ == "__main__":
