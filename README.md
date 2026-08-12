@@ -1,17 +1,21 @@
 # trace
 
 `trace` advects massless Lagrangian tracer particles through a sequence of
-velocity-field snapshots from a numerical-relativity simulation (built for
-GR-Athena++ neutron-star-merger surface output), recording each tracer's
-interpolated thermodynamic history (density, temperature, electron
-fraction, neutrino fluxes, ...) along the way. The resulting per-tracer
-time series are the standard input for nucleosynthesis post-processing
-(e.g. reaction-network codes) of merger ejecta.
+velocity-field snapshots from a numerical-relativity simulation, recording
+each tracer's interpolated thermodynamic history (density, temperature,
+electron fraction, neutrino fluxes, ...) along the way. The resulting
+per-tracer time series are the standard input for nucleosynthesis
+post-processing (e.g. reaction-network codes) of merger ejecta.
 
-This document is a practical guide for *running* the tool: preparing
-input data, invoking the pipeline, understanding every command-line
-option, reading the output back, and running at scale on a cluster. For
-the internals (module layout, class responsibilities) see the section
+Everything except the reader is agnostic about which code produced the
+snapshots. Two formats ship with `trace`, and adding a third means
+implementing one class -- see
+[Supporting a new data format](#supporting-a-new-data-format).
+
+This document is a practical guide for *running* the tool: pointing it at
+your data, invoking the pipeline, understanding every command-line option,
+reading the output back, and running at scale on a cluster. For the
+internals (module layout, class responsibilities) see the section
 ["How it fits together"](#how-it-fits-together) below; for the test suite
 and exploratory examples see `tests/README.md` and `examples/README.md`;
 and for post-processing real tracer output (plots, animations, mass-budget
@@ -21,7 +25,7 @@ checks) see [Analysis scripts](#analysis-scripts) and `analysis/README.md`.
 
 - [Requirements](#requirements)
 - [Quick start](#quick-start)
-- [Step 1: prepare input data](#step-1-prepare-input-data)
+- [Step 1: point it at your data](#step-1-point-it-at-your-data)
 - [Step 2: run the pipeline](#step-2-run-the-pipeline)
   - [Input/output options](#inputoutput-options)
   - [Field options](#field-options)
@@ -37,6 +41,7 @@ checks) see [Analysis scripts](#analysis-scripts) and `analysis/README.md`.
 - [Units](#units)
 - [Analysis scripts](#analysis-scripts)
 - [How it fits together](#how-it-fits-together)
+- [Supporting a new data format](#supporting-a-new-data-format)
 - [Tests and examples](#tests-and-examples)
 - [Troubleshooting](#troubleshooting)
 
@@ -65,50 +70,40 @@ your working directory, or is on `PYTHONPATH`, when invoking any script
 ## Quick start
 
 ```bash
-# 1. Reduce raw GR-Athena++ surface files into the format run_pipeline.py reads.
+# GR-Athena++ surface output: reduce the raw files once, then run.
 python transform_files.py /path/to/raw/*.surface1.*.hdf5 --output_dir data/transformed
-
-# 2. Seed tracers through a spherical shell and integrate them backward in time.
-python run_pipeline.py \
+python run_pipeline.py --format reduced_surface \
     --data-dir data/transformed --output-dir data/tracers_out \
     --start-t 11600 --end-t 0 \
     volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
 
-# 3. Each tracer's full history is now one ASCII file:
+# AthenaK spherical-grid vtk: no preparation step, point it at the dumps.
+python run_pipeline.py --format athenak \
+    --data-dir /path/to/vtk --output-dir data/tracers_out \
+    --start-t 6120 --end-t 6080 \
+    volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
+
+# Each tracer's full history is now one ASCII file:
 ls data/tracers_out/           # tracer_000000.dat, tracer_000001.dat, ...
 ```
 
-## Step 1: prepare input data
+## Step 1: point it at your data
 
-`run_pipeline.py` does **not** read raw GR-Athena++ surface output
-directly. Run `transform_files.py` first, once per simulation, to convert
-the raw per-radius/per-group HDF5 layout into a flat, one-dataset-per-field
-layout that's much cheaper to load repeatedly:
+Pick the format with `--format`. It determines how snapshots are read, and
+sets the defaults for `--file-pattern`, `--rad-transform` and `--keys` --
+which differ between formats because the grids and field names do.
 
-```bash
-python transform_files.py <input_files...> \
-    --output_dir data/transformed \
-    --num_workers 8 \
-    [--delete]
-```
+| `--format` | Data | Preparation | Details |
+|---|---|---|---|
+| `reduced_surface` (default) | GR-Athena++ surface output, HDF5 | Yes -- run `transform_files.py` once per simulation | [docs/formats/gr_athena.md](docs/formats/gr_athena.md) |
+| `athenak` | AthenaK spherical-grid output, binary VTK | None, read directly | [docs/formats/athenak.md](docs/formats/athenak.md) |
 
-| Flag | Meaning |
-|---|---|
-| `input_files` | One or more paths to raw `*.surface*.hdf5` files (shell-glob them, e.g. `raw/*.surface1.*.hdf5`). |
-| `--output_dir` | Where to write the transformed files (default `transformed_files`). This is the directory you'll later pass to `run_pipeline.py --data-dir`. |
-| `--num_workers` | Parallel worker processes (default 4). |
-| `--delete` | Remove each raw input file after it's successfully transformed. Use with care -- there's no undo. |
+Read your format's page before the first run: it lists the field names,
+the grid conventions, and the format-specific caveats. Everything from
+[Step 2](#step-2-run-the-pipeline) onward is the same either way.
 
-What it does, concretely: consolidates the per-radius groups in the raw
-file into single `(n_r, n_theta, n_phi)` datasets, stores the `r`/`th`/`ph`
-coordinate arrays once instead of once per radius, shortens field names,
-and (when the M1 neutrino-transport fields `J_*`, `n_*`, `sc_sqrt_det_g`
-are present) reduces them down to the number flux (`F_nue`, `F_anue`,
-`F_nux`) and mean energy (`eps_nue`, `eps_anue`, `eps_nux`) per species,
-discarding the larger raw M1 quantities. This is the set of fields
-`run_pipeline.py`'s defaults expect (see `--keys` below) -- if your raw
-files carry different fields, or you skip the M1 reduction, pass a
-matching `--keys`/`--vel-keys` to `run_pipeline.py`.
+For a format that isn't listed, see
+[Supporting a new data format](#supporting-a-new-data-format).
 
 ## Step 2: run the pipeline
 
@@ -125,30 +120,35 @@ when to change it from its default.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--data-dir` (required) | -- | Directory of **transformed** snapshot files (output of `transform_files.py`). |
+| `--format` | `reduced_surface` | Snapshot data format; see [Step 1](#step-1-point-it-at-your-data). Also supplies the defaults for `--file-pattern`, `--rad-transform` and `--keys`. |
+| `--data-dir` (required) | -- | Directory of snapshot files. |
 | `--output-dir` | `tracer_output` | Directory to write `tracer_NNNNNN.dat` files to (created if missing). |
-| `--file-pattern` | `*.hdf5` | Glob used to find snapshot files inside `--data-dir`. |
+| `--file-pattern` | per `--format` | Glob used to find snapshot files inside `--data-dir`. |
 | `--start-t` (required) | -- | Time to seed tracers at and start integrating from. |
 | `--end-t` (required) | -- | Time to integrate to. May be **less than** `--start-t` -- the pipeline detects the direction and integrates backward, loading snapshots in reverse. This is the common case for ejecta tracers: seed late (after the ejecta is fully unbound) and integrate backward to trace each tracer's thermodynamic history through the epoch that set its final composition. |
 
-Both times must be given in the same units as the `coordinates/time` field
-of your snapshot files (see [Units](#units)); `--start-t`/`--end-t` don't
-need to exactly match a snapshot time -- the nearest available snapshot
-times are used as the integration bounds.
+Both times must be given in the same units as the time recorded in your
+snapshot files (see [Units](#units)); `--start-t`/`--end-t` don't need to
+exactly match a snapshot time -- the nearest available snapshot times are
+used as the integration bounds.
 
 ### Field options
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--keys` | `V_u_x V_u_y V_u_z T hu_t s u_t rho r_0 F_nue F_anue F_nux eps_nue eps_anue eps_nux` | Every field loaded from the snapshots and recorded along each tracer's history. Must all exist in your transformed files. |
+| `--keys` | per `--format` | Every field loaded from the snapshots and recorded along each tracer's history. Must all exist in your snapshot files. |
 | `--vel-keys` | `V_u_x V_u_y V_u_z` | The (3 of `--keys`) fields used as the Cartesian velocity vector that actually moves the tracers. |
 | `--density-key` | `rho` | Field used as mass density when computing each tracer's represented mass (see the seeding sections below). |
 
-If your transformed data uses different field names (e.g. you skipped the
-M1 reduction, or transformed a non-neutrino-transport run), override
+If your data carries different or extra fields (e.g. you skipped the M1
+reduction, or ran without neutrino transport), override
 `--keys`/`--vel-keys`/`--density-key` accordingly -- there is nothing
 hard-coded elsewhere that depends on the *names*, only on `--vel-keys`
 being 3 of `--keys` and `--density-key` being 1 of `--keys`.
+
+Requesting a key that no snapshot file provides raises a `KeyError` at
+start-up listing the names that *were* found, rather than silently writing
+an all-NaN column.
 
 ### Performance options
 
@@ -177,7 +177,7 @@ tracer's (off-grid) location.
 | `--interpolator` | `pchip` | `pchip` (monotone cubic, `PchipInterpolator3D`) or `regular` (`RegularInterpolator3D`, wraps `scipy.interpolate.RegularGridInterpolator`). |
 | `--interp-method` | `linear` | Method passed through to `RegularGridInterpolator` when `--interpolator=regular`: `linear`, `nearest`, `slinear`, `cubic`, `quintic`, or `pchip`. Ignored for `--interpolator=pchip`. |
 | `--cache-size-gb` | auto | Max memory (GB) each PCHIP interpolator instance's internal cache of per-column 1-D interpolators may use before evicting the oldest entries. `--interpolator=pchip` only. If omitted, it's computed from `/proc/meminfo`'s free memory, `--n-cpu`, and the integrator's snapshot count (leaving an 80% safety margin) -- the computed value and its reasoning are printed at start-up. |
-| `--rad-transform` | `log` | Coordinate transform applied to the radial axis before interpolation: `log` (`log10`, appropriate for the geometrically-spaced radial grids GR-Athena++ surface output uses), `asinh` (`arcsinh(r / scale)`, linear near the origin and logarithmic far out; requires `--rad-scale`), or `none` if your grid's radial spacing is already linear. |
+| `--rad-transform` | per `--format` | Coordinate transform applied to the radial axis before interpolation: `log` (`log10`, for a geometrically-spaced radial grid, as GR-Athena++ surface output uses), `asinh` (`arcsinh(r / scale)`, linear near the origin and logarithmic far out; requires `--rad-scale`), or `none` for a grid whose radial spacing is already linear, as AthenaK's is. |
 | `--rad-scale` | -- | Lin-log transition radius (code units) for `--rad-transform=asinh`: the approximate radius where the `arcsinh` scaling switches from linear to logarithmic behaviour. Required with `asinh`, ignored otherwise. |
 
 `pchip` (the default) guarantees the reconstructed field never overshoots
@@ -481,8 +481,8 @@ cadence, and adjust from there.
 
 `run_pipeline.py` doesn't do any unit conversion -- every length
 (`--r-min`, `--r-max`, `--r-surf`) and time (`--start-t`, `--end-t`) is in
-whatever units your snapshot files' `coordinates/r`/`coordinates/time`
-datasets use, which for GR-Athena++ output is geometric units with
+whatever units the radius and time recorded in your snapshot files use,
+which for both GR-Athena++ and AthenaK output is geometric units with
 `G = c = M_sun = 1`. `analysis/` (below) shows how to convert output back
 to physical units (km, ms, GK, CGS density) for plotting, via
 `tabulatedEOS.unit_system.GeometricSolar`.
@@ -508,14 +508,14 @@ reference; prefer `run_pipeline.py` for anything new.
 ## How it fits together
 
 ```
-transform_files.py                  (raw GR-Athena++ .hdf5  ->  transformed .hdf5)
-        |
-        v
 run_pipeline.py                     (CLI entry point)
         |
-        +-- src/reduced_surface.py  ReducedSurfaceFileHandler: lists/parses
-        |                           transformed files, loads snapshot chunks
-        |                           into shared memory, builds interpolators
+        +-- src/file.py             FileHandler (abstract): chunked
+        |     |                     shared-memory snapshot loading, common
+        |     |                     to every data source
+        |     +-- src/reduced_surface.py  --format reduced_surface
+        |     +-- src/athenak.py          --format athenak
+        |     +-- src/gra_surface.py      raw GR-Athena++, not on the CLI
         |
         +-- src/interpolators/      PchipInterpolator3D, RegularInterpolator3D
         |                           (+ CartesianToSpherical wrapper, radial
@@ -535,12 +535,23 @@ run_pipeline.py                     (CLI entry point)
                                     write each Tracer's history to ASCII
 ```
 
-`src/file.py` defines the abstract `FileHandler` (chunked shared-memory
-snapshot loading, common to any data source); `src/reduced_surface.py` and
-`src/gra_surface.py` are its two concrete implementations for transformed
-and raw GR-Athena++ surface files respectively (only the transformed path
-is wired into `run_pipeline.py`'s CLI today). `src/trajectory.py`'s
-`Trajectory` is the read-side counterpart used by the analysis scripts.
+`src/trajectory.py`'s `Trajectory` is the read-side counterpart used by the
+analysis scripts.
+
+`transform_files.py` sits upstream of all of this and is specific to
+GR-Athena++ surface output (raw `.hdf5` -> transformed `.hdf5`); see
+[docs/formats/gr_athena.md](docs/formats/gr_athena.md).
+
+## Supporting a new data format
+
+Reading a new code's output means implementing one `FileHandler` subclass
+(four methods) and adding an entry to `FORMATS` in `run_pipeline.py`.
+Seeding, integration, interpolation and output need no changes.
+
+[docs/writing_a_reader.md](docs/writing_a_reader.md) is the guide: the
+contract, the conventions that aren't visible in the method signatures, how
+to handle non-uniform grids and polar/periodic ghost zones, and a checklist
+of the things that fail silently if you get them wrong.
 
 ## Tests and examples
 
@@ -577,6 +588,14 @@ is wired into `run_pipeline.py`'s CLI today). `src/trajectory.py`'s
   schemes, 4 for `rk4`). Raise `--files-per-step`, or lower
   `--max-tot-memory-gb`'s implied snapshot count some other way (fewer
   `--keys`, fewer `--n-cpu`).
+- **`KeyError: Not every requested key is available at every snapshot time
+  in ...`**: a `--keys` entry is missing from at least one snapshot. The
+  message lists the offending times and the keys that *were* found
+  anywhere. If it's missing everywhere, it's a typo -- check your format's
+  field table (linked from [Step 1](#step-1-point-it-at-your-data)). If
+  it's missing from only some times, that variable was dumped at a
+  different cadence than the rest; either drop it from `--keys` or point
+  `--data-dir` at only the times that carry everything.
 - **`ValueError: Some seed times do not coincide with available file
   times`**: seeding always happens exactly at a snapshot time.
   `spherical_by_volume` uses `--start-t` directly (not rounded to the
