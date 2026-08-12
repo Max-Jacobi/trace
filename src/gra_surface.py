@@ -25,6 +25,11 @@ def _fill_with_ghosts(
     ):
     """
     Fill buffer with data from h5 file, adding spherical ghost zones.
+
+    The polar ghost zones continue the field across the pole, which for a
+    field smooth on the sphere means reflecting theta and rotating phi by
+    pi.  GR-Athena++'s polar grid is cell-centred, so no row sits on a
+    pole and the reflection is exact.
     """
     try:
         ar = np.array(h5f[key][:])
@@ -36,15 +41,17 @@ def _fill_with_ghosts(
     nphi = ar.shape[1]
     buf[ng:-ng, ng:-ng] = ar[:, :]
     for ig in range(ng):
-        ign = -ig-1
-        buf[ ig, ng:-ng] = np.roll(ar[ ig, :], nphi//2)
-        buf[ign, ng:-ng] = np.roll(ar[ign, :], nphi//2)
-        buf[ng:-ng,  ig] = ar[:, ign]
-        buf[ng:-ng, ign] = ar[:,  ig]
-        buf[ig, ig] = ar[ig, ig]
-        buf[ign, ig] = ar[ign, ig]
-        buf[ig, ign] = ar[ig, ign]
-        buf[ign, ign] = ar[ign, ign]
+        # Padded row ig holds polar index ig - ng, i.e. the ghost row
+        # ng - ig cells beyond the pole, whose mirror image is the row
+        # ng - 1 - ig cells inside it.  The ghost nearest the pole
+        # therefore mirrors the real row nearest the pole, not the one
+        # furthest from it.
+        buf[ ig, ng:-ng] = np.roll(ar[ng-1-ig, :], nphi//2)
+        buf[-ig-1, ng:-ng] = np.roll(ar[-(ng-ig), :], nphi//2)
+    # phi is periodic.  Filled after the polar rows, and by slicing rather
+    # than per-index, so the corners come out consistent with them.
+    buf[:,  :ng] = buf[:, -2*ng:-ng]
+    buf[:, -ng:] = buf[:, ng:2*ng]
 
 class GRASurfaceFileHandler(FileHandler):
     """
