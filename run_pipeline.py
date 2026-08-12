@@ -2,17 +2,25 @@
 """
 General-purpose command-line launcher for the tracer-integration pipeline.
 
-Reads transformed GR-Athena++ surface snapshots (see transform_files.py),
+Reads simulation snapshots in any of the formats listed in FORMATS below,
 seeds tracers either throughout a spherical volume or on a spherical
 surface, integrates them through the velocity field between two times, and
 writes one ASCII file per tracer.
 
 Examples
 --------
-Seed tracers through a spherical shell and integrate backward in time:
+Seed tracers through a spherical shell and integrate backward in time,
+from transformed GR-Athena++ surface files (see transform_files.py):
 
     python run_pipeline.py --data-dir data/transformed --output-dir data/out \\
         --start-t 11600 --end-t 0 \\
+        volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
+
+The same, from AthenaK spherical-grid vtk dumps:
+
+    python run_pipeline.py --format athenak \\
+        --data-dir data/vtk --output-dir data/out \\
+        --start-t 6120 --end-t 6080 \\
         volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
 
 Seed tracers on a spherical surface, sampling every 5th snapshot:
@@ -30,17 +38,44 @@ import numpy as np
 
 from src.interpolators import PchipInterpolator3D, RegularInterpolator3D
 from src.integrators import ExplicitTrapezoid, ImplicitTrapezoid, RK4
+from src.athenak import AthenaKFileHandler
 from src.reduced_surface import ReducedSurfaceFileHandler
 from src.seeds import spherical_by_volume, spherical_surface_by_area
 
-DEFAULT_KEYS = (
-    'V_u_x', 'V_u_y', 'V_u_z',
-    'T', 'hu_t',
-    'u_t', 'rho', 'r_0',
-    'F_nue', 'F_anue', 'F_nux',
-    'eps_nue', 'eps_anue', 'eps_nux',
-)
 DEFAULT_VEL_KEYS = ('V_u_x', 'V_u_y', 'V_u_z')
+
+# Per-format defaults for the options whose sensible value depends on the
+# data source.  Anything given explicitly on the command line wins.
+FORMATS = {
+    'reduced_surface': {
+        'handler': ReducedSurfaceFileHandler,
+        'file_pattern': '*.hdf5',
+        # GR-Athena++ surface output is geometrically spaced in radius.
+        'rad_transform': 'log',
+        'keys': (
+            'V_u_x', 'V_u_y', 'V_u_z',
+            'T', 'hu_t',
+            'u_t', 'rho', 'r_0',
+            'F_nue', 'F_anue', 'F_nux',
+            'eps_nue', 'eps_anue', 'eps_nux',
+        ),
+    },
+    'athenak': {
+        'handler': AthenaKFileHandler,
+        'file_pattern': '*.vtk',
+        # AthenaK's spherical grid is linear in radius.
+        'rad_transform': 'none',
+        # No entropy and no hu_t in AthenaK's dumps; four neutrino species
+        # instead of three.  See src/athenak.py's FIELD_MAP for how these
+        # canonical names map onto AthenaK's own scalar names.
+        'keys': (
+            'V_u_x', 'V_u_y', 'V_u_z',
+            'T', 'u_t', 'rho', 'r_0',
+            'F_nue', 'F_anue', 'F_nux', 'F_anux',
+            'eps_nue', 'eps_anue', 'eps_nux', 'eps_anux',
+        ),
+    },
+}
 
 INTEGRATOR_N_SNAPSHOTS = {'expl_trap': 2, 'impl_trap': 2, 'rk4': 4}
 
@@ -53,20 +88,27 @@ def parse_args() -> argparse.Namespace:
     )
 
     io_group = parser.add_argument_group("input/output")
+    io_group.add_argument('--format', choices=sorted(FORMATS), default='reduced_surface',
+                           help="Snapshot data format. 'reduced_surface': transformed "
+                                "GR-Athena++ surface hdf5 (see transform_files.py). "
+                                "'athenak': AthenaK spherical-grid vtk. Sets the defaults "
+                                "for --keys, --file-pattern and --rad-transform.")
     io_group.add_argument('--data-dir', required=True,
-                           help="Directory of transformed surface hdf5 files.")
+                           help="Directory of snapshot files.")
     io_group.add_argument('--output-dir', default='tracer_output',
                            help="Directory to write per-tracer ASCII files to.")
-    io_group.add_argument('--file-pattern', default='*.hdf5',
-                           help="Glob pattern used to find snapshot files in --data-dir.")
+    io_group.add_argument('--file-pattern', default=None,
+                           help="Glob pattern used to find snapshot files in --data-dir "
+                                "(default: per --format).")
     io_group.add_argument('--start-t', required=True, type=float,
                            help="Time to seed and start integrating tracers from.")
     io_group.add_argument('--end-t', required=True, type=float,
                            help="Time to integrate tracers to (can be < start-t for backward integration).")
 
     field_group = parser.add_argument_group("fields")
-    field_group.add_argument('--keys', nargs='+', default=list(DEFAULT_KEYS),
-                              help="Field keys to load and carry along each tracer.")
+    field_group.add_argument('--keys', nargs='+', default=None,
+                              help="Field keys to load and carry along each tracer "
+                                   "(default: per --format).")
     field_group.add_argument('--vel-keys', nargs='+', default=list(DEFAULT_VEL_KEYS),
                               help="Field keys (subset of --keys) used as the velocity vector.")
     field_group.add_argument('--density-key', default='rho',
@@ -95,9 +137,9 @@ def parse_args() -> argparse.Namespace:
                                help="Max cache size per PCHIP x-interpolator (--interpolator=pchip only). "
                                     "Default: auto-computed from free memory, --n-cpu, and the integrator's "
                                     "snapshot count.")
-    interp_group.add_argument('--rad-transform', choices=['log', 'asinh', 'none'], default='log',
-                               help="Coordinate transform applied to the radial axis before interpolation. "
-                                    "'asinh' requires --rad-scale.")
+    interp_group.add_argument('--rad-transform', choices=['log', 'asinh', 'none'], default=None,
+                               help="Coordinate transform applied to the radial axis before interpolation "
+                                    "(default: per --format). 'asinh' requires --rad-scale.")
     interp_group.add_argument('--rad-scale', type=float, default=None,
                                help="Lin-log transition radius for --rad-transform=asinh (code units).")
 
@@ -151,8 +193,20 @@ def parse_args() -> argparse.Namespace:
                           help="Build one time slot every Nth snapshot between --start-t and --end-t.")
 
     args = parser.parse_args()
+
+    fmt = FORMATS[args.format]
+    if args.keys is None:
+        args.keys = list(fmt['keys'])
+    if args.file_pattern is None:
+        args.file_pattern = fmt['file_pattern']
+    if args.rad_transform is None:
+        args.rad_transform = fmt['rad_transform']
+
     if args.rad_transform == 'asinh' and args.rad_scale is None:
         parser.error("--rad-transform=asinh requires --rad-scale")
+    missing = [k for k in list(args.vel_keys) + [args.density_key] if k not in args.keys]
+    if missing:
+        parser.error(f"--vel-keys/--density-key entries not present in --keys: {missing}")
     return args
 
 
@@ -212,7 +266,7 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
     else:
         rad_transform = None
 
-    return ReducedSurfaceFileHandler(
+    return FORMATS[args.format]['handler'](
         interpolator=interpolator_cls,
         directory=args.data_dir,
         keys=list(args.keys),

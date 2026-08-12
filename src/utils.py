@@ -1,10 +1,88 @@
 from contextlib import contextmanager
 from multiprocessing import Pool, get_context
 from itertools import count, repeat
+from pathlib import Path
 from sys import stdout
 from typing import Optional, Callable, Iterable
 from tqdm import tqdm
 import atexit
+
+import numpy as np
+
+
+def fill_spherical_ghosts(
+    buf,
+    ar,
+    ng: int,
+    node_centred: bool = False,
+) -> None:
+    """
+    Copy ``ar`` into ``buf``'s interior and fill ``buf``'s ghost zones.
+
+    Ghost zones continue the field across both poles (mirroring a row from
+    the other side of the pole and rotating it by pi in phi) and
+    periodically in phi.  The last two axes of both arrays are the polar
+    and azimuthal ones; any leading axes (e.g. radius) are carried along
+    untouched, so this works on a single shell or a whole 3-D block.
+
+    Parameters
+    ----------
+    buf : ndarray, shape (..., n_polar + 2*ng, n_phi + 2*ng)
+        Destination buffer.
+    ar : ndarray, shape (..., n_polar, n_phi)
+        Field data on the bare grid.
+    ng : int
+        Number of ghost zones per side.
+    node_centred : bool, optional
+        Whether the first and last polar rows of ``ar`` sit exactly *on*
+        the poles (as AthenaK's spherical output does).  If ``False`` (the
+        default, and what GR-Athena++ writes) they are half a cell away
+        from them, and the mirror source is offset by one row.
+
+    Notes
+    -----
+    For a cell-centred grid the polar mirror is the exact analytic
+    continuation of a field smooth on the sphere.  For a node-centred one
+    it is only an extension, since the row on the pole is its own mirror
+    image -- see docs/formats/athenak.md.
+    """
+    half = ar.shape[-1] // 2
+    buf[..., ng:-ng, ng:-ng] = ar
+    for k in range(1, ng + 1):
+        # Ghost row k cells outside the pole mirrors the row k (node-centred)
+        # or k - 1 (cell-centred) cells inside it, rotated by pi in phi.
+        src = k if node_centred else k - 1
+        buf[..., ng - k, ng:-ng] = np.roll(ar[..., src, :], half, axis=-1)
+        buf[..., -ng + k - 1, ng:-ng] = np.roll(ar[..., -1 - src, :], half, axis=-1)
+    # phi is periodic; done after the polar rows so the corners come out
+    # consistent with them.
+    buf[..., :ng] = buf[..., -2 * ng:-ng]
+    buf[..., -ng:] = buf[..., ng:2 * ng]
+
+
+def glob_files(directory: str, pattern: str) -> list[str]:
+    """
+    List files in ``directory`` matching ``pattern``, sorted by name.
+
+    ``pattern`` may be a glob (``*.hdf5``) or a plain suffix (``.hdf5``).
+
+    Raises
+    ------
+    FileNotFoundError
+        If nothing matches, so a mistyped pattern or data directory fails
+        immediately instead of looking like an empty simulation.
+    """
+    path = Path(directory)
+    if any(ch in pattern for ch in "*?[]"):
+        files = sorted(str(f) for f in path.glob(pattern) if f.is_file())
+    else:
+        files = sorted(str(f) for f in path.iterdir()
+                       if f.is_file() and f.name.endswith(pattern))
+    if not files:
+        raise FileNotFoundError(
+            f"No files matching pattern '{pattern}' found in directory: {directory}"
+        )
+    return files
 
 # Workers that only attach to shared memory owned by the main process rely
 # on inheriting the calling module's already-computed state via

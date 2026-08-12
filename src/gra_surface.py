@@ -13,6 +13,7 @@ from h5py import File
 import numpy as np
 
 from .file import FileHandler
+from .utils import fill_spherical_ghosts
 from .interpolators.base import InterpolatorBase
 from .interpolators.coordinate_transformations import CartesianToSpherical
 
@@ -38,20 +39,7 @@ def _fill_with_ghosts(
         print(h5f.keys())
         print(h5f.file)
         raise
-    nphi = ar.shape[1]
-    buf[ng:-ng, ng:-ng] = ar[:, :]
-    for ig in range(ng):
-        # Padded row ig holds polar index ig - ng, i.e. the ghost row
-        # ng - ig cells beyond the pole, whose mirror image is the row
-        # ng - 1 - ig cells inside it.  The ghost nearest the pole
-        # therefore mirrors the real row nearest the pole, not the one
-        # furthest from it.
-        buf[ ig, ng:-ng] = np.roll(ar[ng-1-ig, :], nphi//2)
-        buf[-ig-1, ng:-ng] = np.roll(ar[-(ng-ig), :], nphi//2)
-    # phi is periodic.  Filled after the polar rows, and by slicing rather
-    # than per-index, so the corners come out consistent with them.
-    buf[:,  :ng] = buf[:, -2*ng:-ng]
-    buf[:, -ng:] = buf[:, ng:2*ng]
+    fill_spherical_ghosts(buf, ar, ng, node_centred=False)
 
 class GRASurfaceFileHandler(FileHandler):
     """

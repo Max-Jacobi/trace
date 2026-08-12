@@ -6,7 +6,6 @@ Reduced Surface Module
 """
 
 import signal
-from pathlib import Path
 from typing import Any
 from multiprocessing.shared_memory import SharedMemory
 
@@ -14,6 +13,7 @@ from h5py import File
 import numpy as np
 
 from .file import FileHandler
+from .utils import glob_files
 from .gra_surface import _fill_with_ghosts
 from .interpolators.base import InterpolatorBase
 from .interpolators.coordinate_transformations import CartesianToSpherical
@@ -42,18 +42,7 @@ class ReducedSurfaceFileHandler(FileHandler):
         signal.signal(signal.SIGINT, self.handler)
 
     def list_files(self, directory: str) -> list[str]:
-        path = Path(directory)
-        has_glob = any(ch in self.file_pattern for ch in "*?[]")
-        if has_glob:
-            files = sorted(str(f) for f in path.glob(self.file_pattern) if f.is_file())
-        else:
-            files = sorted(str(f) for f in path.iterdir() if f.is_file() and f.name.endswith(self.file_pattern))
-
-        if not files:
-            raise FileNotFoundError(
-                f"No files matching pattern '{self.file_pattern}' found in directory: {directory}"
-            )
-
+        files = glob_files(directory, self.file_pattern)
         self.load_grid(files[0])
         return files
 

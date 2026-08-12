@@ -190,6 +190,29 @@ class FileHandler(ABC):
         self.files = np.array([reduce(lambda a, b: {**a, **b}, files[rev_idx == i], {})
                       for i, _ in enumerate(self.times)])
 
+        # Every key must be present at every time.  A key missing from one
+        # snapshot is never loaded into that snapshot's buffer, which then
+        # still holds whatever the previous chunk left there -- silently
+        # integrating tracers through a stale field.  This bites formats
+        # that write one variable per file (a variable dumped at a different
+        # cadence than the rest), so it is checked rather than assumed.
+        found = {key for group in self.files for keys in group.values() for key in keys}
+        gaps = {}
+        for time, group in zip(self.times, self.files):
+            have = {key for keys in group.values() for key in keys}
+            missing = [key for key in self.keys if key not in have]
+            if missing:
+                gaps[float(time)] = missing
+        if gaps:
+            shown = sorted(gaps)[:5]
+            detail = "; ".join(f"t={t:g} missing {gaps[t]}" for t in shown)
+            more = f" (and {len(gaps) - len(shown)} more times)" if len(gaps) > len(shown) else ""
+            raise KeyError(
+                f"Not every requested key is available at every snapshot time in "
+                f"{directory}: {detail}{more}. Keys found anywhere: {sorted(found)}. "
+                "Trim --keys, or restrict the directory to times that carry all of them."
+            )
+
     def get_available_psm(self) -> int:
         st = os.statvfs("/dev/shm")
         return st.f_bavail * st.f_frsize
