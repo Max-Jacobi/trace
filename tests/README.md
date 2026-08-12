@@ -2,8 +2,13 @@
 
 All tests live in `tests/` and are run with [pytest](https://docs.pytest.org).
 These are all fast, self-contained unit tests with pass/fail assertions: no
-real simulation data, no MPI, and any shared memory is created and cleaned
-up within each test.  The full suite runs in under one second.
+MPI, and any shared memory is created and cleaned up within each test.  The
+full suite runs in under two seconds.
+
+Almost all of them are free of real simulation data too; the one exception
+is `TestRealFiles` in `test_athenak.py`, which checks the AthenaK reader
+against a real dump if one is present and skips itself otherwise (point
+`$ATHENAK_SAMPLE_DIR` at a directory of AthenaK `.vtk` dumps to enable it).
 
 The exploratory, longer-running end-to-end scripts (blast wave, disk-wind
 ejecta, ExplicitTrapezoid vs ImplicitTrapezoid) have no pass/fail
@@ -11,7 +16,7 @@ assertions and aren't pytest tests -- they live in `examples/` instead. See
 `examples/README.md`.
 
 ```bash
-# Run the full suite (93 tests, < 1 second)
+# Run the full suite (118 tests, < 2 seconds)
 python -m pytest tests/ -v
 
 # Run a single file
@@ -19,6 +24,7 @@ python -m pytest tests/test_integrators.py -v
 python -m pytest tests/test_interpolators.py -v
 python -m pytest tests/test_seeds.py -v
 python -m pytest tests/test_seeds_surface.py -v
+python -m pytest tests/test_athenak.py -v
 
 # Run a single class or test
 python -m pytest tests/test_integrators.py::TestRK4 -v
@@ -28,9 +34,18 @@ python -m pytest tests/test_seeds.py::TestSphericalByVolume::test_constant_densi
 | File | Tests | Runtime | What it covers |
 |---|---|---|---|
 | `test_integrators.py` | 29 | < 1 s | ExplicitTrapezoid, ImplicitTrapezoid, RK4 |
-| `test_interpolators.py` | 27 | < 1 s | RegularInterpolator3D, PchipInterpolator3D, CartesianToSpherical |
+| `test_interpolators.py` | 28 | < 1 s | RegularInterpolator3D, PchipInterpolator3D, CartesianToSpherical |
 | `test_seeds.py` | 25 | < 1 s | `_gauss_legendre_3d/surface` helpers, `spherical_by_volume` |
-| `test_seeds_surface.py` | 12 | < 1 s | `spherical_surface_by_area` |
+| `test_seeds_surface.py` | 13 | < 1 s | `spherical_surface_by_area` |
+| `test_athenak.py` | 23 | < 1 s | `scan_vtk`/`read_grid`/`polar_axis`, `fill_spherical_ghosts`, `AthenaKFileHandler` |
+
+`test_athenak.py` builds small AthenaK-layout `.vtk` files from scratch
+(`write_athenak_vtk`), so it needs no external data.  Its
+`test_interpolates_grid_points_exactly` is the round-trip check any new
+reader should copy: read a snapshot through the handler, interpolate at the
+grid nodes, and compare against the stored values -- it is what catches an
+axis-order or transpose mistake.  See
+[docs/writing_a_reader.md](../docs/writing_a_reader.md).
 
 ---
 
