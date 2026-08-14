@@ -67,11 +67,12 @@ class GRASurfaceFileHandler(FileHandler):
         surface_num: int = 1,
         **kwargs
         ) -> None:
-        # rad_transform: spec for the radial axis: "log", ("asinh", scale), or None.
-        self.extra_data = {'interpolator': interpolator, 'rad_transform': rad_transform}
         self.n_ghosts = interpolator.n_ghosts
         self.surface_num = surface_num
-        super().__init__(*args, **kwargs)
+        super().__init__(interpolator, *args, **kwargs)
+        # Set after super().__init__, which builds extra_data itself.
+        # rad_transform: spec for the radial axis: "log", ("asinh", scale), or None.
+        self.extra_data['rad_transform'] = rad_transform
         signal.signal(signal.SIGINT, self.handler)
 
     def list_files(self, directory: str) -> list[str]:

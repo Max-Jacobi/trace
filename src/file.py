@@ -224,7 +224,8 @@ class FileHandler(ABC):
         """
         Cleanup shared memory.
         """
-        for sh in self.shared_memory:
+        # Nothing to free if __init__ raised before allocate_memory().
+        for sh in getattr(self, "shared_memory", ()):
             for key in sh:
                 try:
                     sm = SharedMemory(name=sh[key])
