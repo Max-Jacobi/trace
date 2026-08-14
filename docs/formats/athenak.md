@@ -65,7 +65,7 @@ python run_pipeline.py --format athenak \
 | Option | Default for this format |
 |---|---|
 | `--file-pattern` | `*.vtk` |
-| `--rad-transform` | `none` (the radial grid is linear) |
+| `--rad-transform` | `log` (the radial grid is geometrically spaced) |
 | `--keys` | `V_u_x V_u_y V_u_z T u_t rho r_0 F_nue F_anue F_nux F_anux eps_nue eps_anue eps_nux eps_anux` |
 
 See the [main README](../../README.md#step-2-run-the-pipeline) for every
@@ -73,10 +73,13 @@ other option.
 
 ## Grid conventions
 
-`r` is **linear** from `rmin` to `rmax` inclusive, hence
-`--rad-transform none`. `phi` is uniform over `[0, 2*pi)`, and may start at
-`0` or at `dphi/2` -- it makes no difference, `phi` is periodic and the
-ghost zones cover either seam.
+`r` is **geometrically spaced** from `rmin` to `rmax` inclusive, hence
+`--rad-transform log`. Older dumps were linear in `r`; pass
+`--rad-transform none` for those. Either way the radial axis may be
+non-uniform, so this is an accuracy choice rather than a correctness one.
+`phi` is uniform over `[0, 2*pi)`, and may start at `0` or at `dphi/2` --
+it makes no difference, `phi` is periodic and the ghost zones cover either
+seam.
 
 The **polar axis** is the one that matters, and the reader detects its
 convention per dataset rather than assuming one, because AthenaK may write
@@ -84,8 +87,8 @@ either of these:
 
 | Convention | Polar nodes | Interpolated in | Nearest node to the axis (`n_th=128`) |
 |---|---|---|---|
-| `mu`, node-centred | uniform in `cos(theta)`, `theta = pi` and `0` are nodes, rows descending | `mu = cos(theta)` | 10.18 deg |
-| `theta`, cell-centred | uniform in `theta`, first node at `dtheta/2` | `theta` | 0.70 deg |
+| `theta`, cell-centred *(current)* | uniform in `theta`, first node at `dtheta/2` | `theta` | 0.70 deg |
+| `mu`, node-centred *(older dumps)* | uniform in `cos(theta)`, both poles are nodes, rows descending | `mu = cos(theta)` | 10.18 deg |
 
 `polar_axis()` in `src/athenak.py` decides which by checking whether
 `theta` or `cos(theta)` is the uniformly spaced one, whether a node sits on
@@ -138,6 +141,13 @@ Gauss-Legendre quadrature over each tracer's cell.
   keys if not, rather than integrating through a stale buffer. Either trim
   `--keys`, or point `--data-dir` at a directory holding only the times
   that carry all of them.
+- **Non-finite values are rejected at load.** Interpolation needs finite
+  data everywhere, so a field carrying `inf` or `NaN` raises a `ValueError`
+  naming the file, the field and the affected fraction. This is worth
+  knowing about for the ratio-derived quantities: the mean neutrino
+  energies `e:0..3` are `inf` wherever the neutrino number density they
+  divide by vanishes, which in an early snapshot is most of the domain.
+  Until the dumps guard that division, drop `eps_*` from `--keys`.
 - **Four neutrino species, not three.** The default `--keys` carries
   `*_anux` in addition to GR-Athena++'s three. Confirm the species ordering
   of `e:0..3` / `|F|:0..3` against your input file before reading physics

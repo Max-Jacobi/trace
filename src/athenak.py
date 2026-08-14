@@ -336,6 +336,20 @@ class AthenaKFileHandler(FileHandler):
                 # File order is phi-slowest, r-fastest; the interpolator
                 # wants (r, polar, phi) with the polar axis ascending.
                 ar = read_block(path, offset, n_cells, dtype)
+                # Checked here rather than several layers down inside
+                # scipy.interpolate, which reports only "`y` must contain
+                # only finite values" and names neither the field nor the
+                # file.  A ratio-derived field (a mean energy, say) is an
+                # easy way to end up with inf wherever its denominator
+                # vanishes.
+                n_bad = int(np.count_nonzero(~np.isfinite(ar)))
+                if n_bad:
+                    raise ValueError(
+                        f"{path}: field '{FIELD_MAP.get(key, key)}' has {n_bad} of "
+                        f"{n_cells} values non-finite ({100 * n_bad / n_cells:.1f}%). "
+                        f"Interpolation needs finite data everywhere, so either fix "
+                        f"the dump or drop '{key}' from --keys."
+                    )
                 ar = ar.reshape(n_ph, n_th, n_r).transpose(2, 1, 0)
                 if extra_data['flip_polar']:
                     ar = ar[:, ::-1, :]

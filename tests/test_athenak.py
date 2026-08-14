@@ -371,14 +371,58 @@ class TestFileHandler:
     reason=f"no AthenaK sample data at {ATHENAK_SAMPLE_DIR}",
 )
 class TestRealFiles:
-    def test_reads_a_real_dump(self):
+    """
+    Asserts what must hold for *any* AthenaK dump rather than the geometry
+    of whichever grid is on disk.  That has already changed once (linear
+    radius with an equal-solid-angle polar axis, then geometric radius
+    with a cell-centred uniform-theta one), and absorbing exactly that
+    without being edited is the point of the reader.
+    """
+
+    def _path(self):
         import glob
-        path = sorted(glob.glob(f"{ATHENAK_SAMPLE_DIR}/*mhd_w_d*.vtk"))[0]
-        info = scan_vtk(path)
-        assert info["dims"] == (128, 128, 256)
+        return sorted(glob.glob(f"{ATHENAK_SAMPLE_DIR}/*mhd_w_d*.vtk"))[0]
+
+    def test_reads_a_real_dump(self):
+        info = scan_vtk(self._path())
+        n_r, n_th, n_ph = info["dims"]
+        assert n_r > 1 and n_th > 1 and n_ph > 1
+        assert info["n_points"] == n_r * n_th * n_ph
+        assert info["time"] is not None
         assert FIELD_MAP["rho"] in info["scalars"]
 
+    def test_grid_is_separable_and_supported(self):
+        path = self._path()
+        info = scan_vtk(path)
+        _, _, n_ph = info["dims"]
+        # read_grid raises unless POINTS is a separable (r, theta, phi) grid
         r, th, ph = read_grid(path, info)
-        np.testing.assert_allclose(np.diff(r), r[1] - r[0], rtol=1e-4)
-        np.testing.assert_allclose(np.cos(th), np.linspace(-1, 1, 128), atol=1e-6)
-        np.testing.assert_allclose(ph, np.arange(256) * (2 * np.pi / 256), atol=1e-5)
+
+        assert np.all(np.diff(r) > 0), "radius must be ascending"
+        np.testing.assert_allclose(np.diff(ph), 2 * np.pi / n_ph, atol=1e-4)
+
+        # polar_axis must recognise the convention, and the exactly uniform
+        # nodes it returns must reproduce the file's own coordinates.
+        name, nodes, flip, _ = polar_axis(th)
+        assert name in ("theta", "mu")
+        from_file = np.cos(th) if name == "mu" else th
+        np.testing.assert_allclose(nodes, from_file[::-1] if flip else from_file, atol=1e-5)
+
+    def test_every_field_is_present_at_every_time(self):
+        """
+        One variable per file makes it easy to end up with a variable
+        dumped at a different cadence than the rest, which the pipeline
+        rejects.  Fail here, with a readable message, instead of at the
+        start of a production run.
+        """
+        import glob
+        from collections import defaultdict
+        per_time = defaultdict(set)
+        for path in sorted(glob.glob(f"{ATHENAK_SAMPLE_DIR}/*.vtk")):
+            info = scan_vtk(path)
+            per_time[info["time"]] |= set(info["scalars"]) - {"weights"}
+        assert per_time, "no AthenaK dumps found"
+        everything = set().union(*per_time.values())
+        gaps = {t: sorted(everything - have) for t, have in per_time.items()
+                if have != everything}
+        assert not gaps, f"fields missing at some times: {gaps}"
