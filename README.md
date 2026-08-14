@@ -494,8 +494,8 @@ tracer output (as opposed to `examples/`'s synthetic-velocity-field
 validation scripts): plotting a random sample of tracer histories vs
 time, rendering a 3-D animation, checking the `volume`/`surface`
 mass-budget consistency discussed above, and a mass-weighted histogram
-panel of standard summary quantities (peak temperature, `Ye`/entropy/
-expansion-timescale at a reference temperature, final angle/radius/
+panel of standard summary quantities (peak temperature, `Ye` and
+expansion timescale at a reference temperature, final angle/radius/
 velocity, including the asymptotic velocity implied by the geodesic
 criterion when `u_t` is available). See `analysis/README.md` for full
 option documentation for each.

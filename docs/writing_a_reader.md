@@ -131,7 +131,7 @@ worker processes**, so it must reconstruct everything it needs from
   stale field rather than fail. It also catches a plain typo at start-up
   instead of producing an all-NaN column.
 - **Key names are yours to choose.** If your code's names differ from the
-  canonical ones the analysis scripts expect (`rho`, `T`, `s`, `r_0`,
+  canonical ones the analysis scripts expect (`rho`, `T`, `r_0`,
   `u_t`, `V_u_x/y/z`, `F_*`, `eps_*`), map them inside the handler rather
   than making users pass raw names. `src/athenak.py`'s `FIELD_MAP` does
   this, falling through unchanged for names it doesn't know so raw names

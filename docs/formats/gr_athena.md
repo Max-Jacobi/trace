@@ -100,7 +100,6 @@ Time is in `coordinates/time`; lengths and times are geometric
 | `V_u_x`, `V_u_y`, `V_u_z` | Coordinate velocity `dx^i/dt`. |
 | `rho` | Rest-mass density. |
 | `T` | Temperature. |
-| `s` | Specific entropy. |
 | `r_0` | Passive scalar 0, i.e. `Y_e`. |
 | `u_t` | Covariant time component of the four-velocity (geodesic unbound criterion). |
 | `hu_t` | `h * u_t` (Bernoulli unbound criterion). |
@@ -109,12 +108,15 @@ Time is in `coordinates/time`; lengths and times are geometric
 
 ## Caveats
 
-- **`transform_files.py` drops `s` and `hu_t`.** `reduce_m1_quantities`
-  deletes them along with the raw M1 quantities, even though both appear in
-  this format's default `--keys` and both are used by `analysis/`. On a run
-  with M1 fields present you will therefore get a `KeyError` at start-up
-  listing the keys that were found. Either drop them from `--keys`, or
-  remove them from the delete list in `transform_files.py:78`.
+- **`transform_files.py` drops `hu_t`.** `reduce_m1_quantities` deletes it
+  along with the raw M1 quantities, even though it appears in this
+  format's default `--keys`. On a run with M1 fields present you will
+  therefore get a `KeyError` at start-up naming it. Either drop it from
+  `--keys`, or remove it from the delete list in `transform_files.py`.
+  Losing it costs only the Bernoulli unbound criterion, which `analysis/`
+  skips when it is absent. The same reduction also deletes the entropy,
+  which nothing asks for any more -- see
+  [analysis/README.md](../../analysis/README.md#a-note-on-entropy).
 - **`src/gra_surface.py`'s `GRASurfaceFileHandler`** reads *raw* surface
   files without the transform step. It is not wired into `run_pipeline.py`
   and is much slower per snapshot, since it reassembles the per-radius

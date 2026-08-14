@@ -152,10 +152,10 @@ Gauss-Legendre quadrature over each tracer's cell.
   `*_anux` in addition to GR-Athena++'s three. Confirm the species ordering
   of `e:0..3` / `|F|:0..3` against your input file before reading physics
   into the labels.
-- **No entropy and no `hu_t`.** Neither is in the dumps, so
-  `analysis/histograms.py` and `analysis/plot_trajectories.py` need their
-  entropy panels dropped. Both handle a missing `hu_t` gracefully already
-  (the Bernoulli criterion is skipped), but `s` is assumed present.
+- **No `hu_t`.** It is not in the dumps, so the Bernoulli unbound
+  criterion is unavailable. `analysis/` skips it when absent, so nothing
+  breaks. Entropy is likewise absent and likewise not needed -- see
+  [analysis/README.md](../../analysis/README.md#a-note-on-entropy).
 - **Polar accuracy, on the `mu` node-centred grid only.** Interpolation
   loses most of its accuracy inside the polar cap, `theta < 10.2` degrees
   for `n_th = 128` -- about 1.6% of the sphere, both caps together.
