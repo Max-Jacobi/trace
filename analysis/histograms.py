@@ -2,7 +2,7 @@
 """
 Mass-weighted histogram panel of per-tracer summary quantities -- the
 standard "what does this ejecta look like" overview: peak temperature,
-composition/entropy/expansion-timescale at the nucleosynthesis-relevant
+composition and expansion timescale at the nucleosynthesis-relevant
 freeze-out temperature, where the ejecta ends up (angle, radius), and how
 fast it's ultimately moving.
 
@@ -32,7 +32,7 @@ from analysis._common import (
 )
 
 ALL_PANELS = (
-    'Tmax', 'Ye_ref', 's_ref', 'tau_ref', 'theta_final', 'phi_final', 'r_final', 'v_final',
+    'Tmax', 'Ye_ref', 'tau_ref', 'theta_final', 'phi_final', 'r_final', 'v_final',
 )
 
 
@@ -44,12 +44,12 @@ def parse_args() -> argparse.Namespace:
     )
     add_tracer_loading_args(parser)
     parser.add_argument('--t-ref-gk', type=float, default=5.0,
-                         help="Reference ('NSE dropout') temperature in GK, at which Ye/entropy/expansion "
-                              "timescale are sampled -- typical literature values are 5-6 GK.")
+                         help="Reference ('NSE dropout') temperature in GK, at which Ye and the "
+                              "expansion timescale are sampled -- typical literature values are 5-6 GK.")
     parser.add_argument('--panels', nargs='+', default=list(ALL_PANELS), choices=list(ALL_PANELS),
                          help="Which panels to include.")
     parser.add_argument('--r-ref-km', type=float, nargs='+', default=[],
-                         help="Reference radii in km. For each, an extra figure is written with Ye, s, T, "
+                         help="Reference radii in km. For each, an extra figure is written with Ye, T, "
                               "|v| (coordinate + asymptotic), theta and phi sampled at the time each tracer "
                               "first crosses outward through that radius.")
     parser.add_argument('--bins', type=int, default=40, help="Number of histogram bins per panel.")
@@ -60,21 +60,24 @@ def parse_args() -> argparse.Namespace:
 
 def _reference_values(traj, t_ref_gk: float, Tfac: float) -> tuple:
     """
-    Ye, entropy, and expansion timescale (code time units) at the time the
-    tracer's temperature first drops through t_ref_gk, walking forward from
-    its hottest recorded point. Returns (nan, nan, nan) if it never reaches
+    Ye and expansion timescale (code time units) at the time the tracer's
+    temperature first drops through t_ref_gk, walking forward from its
+    hottest recorded point. Returns (nan, nan) if it never reaches
     t_ref_gk in that range.
+
+    Entropy is deliberately not carried here.  Not every data source dumps
+    it, and it is recoverable after the fact by evaluating the EOS along
+    each tracer's (rho, T, Ye) history.
     """
     T = traj.data['T'] * Tfac
     i_hot = np.argmax(T)
     T_after = T[i_hot:]
     # size guard: np.gradient needs >=2 points; chained comparison is False for NaN T
     if T_after.size < 2 or not (T_after.min() <= t_ref_gk <= T_after.max()):
-        return np.nan, np.nan, np.nan
+        return np.nan, np.nan
 
     time_after = traj.data['time'][i_hot:]
     ye_after = traj.data['r_0'][i_hot:]
-    s_after = traj.data['s'][i_hot:]
     rho_after = traj.data['rho'][i_hot:]
     drhodt = np.gradient(rho_after, time_after)
     tau_after = rho_after / (np.abs(drhodt) + 1e-300)
@@ -82,9 +85,8 @@ def _reference_values(traj, t_ref_gk: float, Tfac: float) -> tuple:
     # np.interp needs increasing x; T_after is decreasing from the hottest point onward.
     T_rev = T_after[::-1]
     ye_ref = np.interp(t_ref_gk, T_rev, ye_after[::-1])
-    s_ref = np.interp(t_ref_gk, T_rev, s_after[::-1])
     tau_ref = np.interp(t_ref_gk, T_rev, tau_after[::-1])
-    return float(ye_ref), float(s_ref), float(tau_ref)
+    return float(ye_ref), float(tau_ref)
 
 
 def _crossing_time(traj, r_ref: float) -> float:
@@ -135,8 +137,8 @@ def _velocity_panel(ax, v_coord, v_inf_geo, v_inf_bernoulli, masses, total_mass,
 
 
 def _radius_figure(trajs, masses, total_mass, r_ref_km, units, bins):
-    """Histogram figure of Ye, s, T, |v|, theta, phi sampled where tracers cross r_ref_km."""
-    keys = ['r_0', 's', 'T', 'theta', 'phi', 'V_u_x', 'V_u_y', 'V_u_z']
+    """Histogram figure of Ye, T, |v|, theta, phi sampled where tracers cross r_ref_km."""
+    keys = ['r_0', 'T', 'theta', 'phi', 'V_u_x', 'V_u_y', 'V_u_z']
     keys += [k for k in ('u_t', 'hu_t') if k in trajs[0].data]
     vals = _values_at_radius(trajs, r_ref_km / units.length_km, keys)
 
@@ -151,19 +153,23 @@ def _radius_figure(trajs, masses, total_mass, r_ref_km, units, bins):
 
     panels = [
         (vals['r_0'], rf"$Y_e$ at {r_ref_km:g} km", False),
-        (vals['s'], rf"$s$ at {r_ref_km:g} km ($k_{{\rm B}}$)", False),
         (vals['T'] * units.temperature_gk, rf"$T$ at {r_ref_km:g} km (GK)", False),
         (vals['theta'], rf"$\theta$ at {r_ref_km:g} km (deg)", False),
         (vals['phi'] % 360, rf"$\phi$ at {r_ref_km:g} km (deg)", False),
     ]
-    fig, ax = plt.subplots(2, 3, figsize=(12, 6.6), squeeze=False)
+    n_used = len(panels) + 1  # panels plus the velocity panel
+    n_cols = 3
+    n_rows = -(-n_used // n_cols)
+    fig, ax = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.3 * n_rows), squeeze=False)
     ax_flat = ax.flatten()
     for a, (values, label, log) in zip(ax_flat, panels):
         _mass_weighted_hist(a, values, masses, bins, label, log)
     _velocity_panel(ax_flat[len(panels)], v_coord, v_inf_geo, v_inf_bernoulli,
                     masses, total_mass, bins, f"at {r_ref_km:g} km (coordinate)")
-    for a in ax_flat:
+    for a in ax_flat[:n_used]:
         a.set_ylabel(r"$\Delta m$ ($M_\odot$)")
+    for a in ax_flat[n_used:]:
+        a.set_visible(False)
     fig.tight_layout()
     return fig
 
@@ -201,17 +207,15 @@ def main() -> None:
     if 'Tmax' in args.panels:
         panel_values['Tmax'] = np.array([np.max(tr.data['T']) for tr in trajs]) * units.temperature_gk
 
-    if {'Ye_ref', 's_ref', 'tau_ref'} & set(args.panels):
+    if {'Ye_ref', 'tau_ref'} & set(args.panels):
         ref = [_reference_values(tr, args.t_ref_gk, units.temperature_gk) for tr in trajs]
-        ye_ref, s_ref, tau_ref = (np.array(x) for x in zip(*ref))
+        ye_ref, tau_ref = (np.array(x) for x in zip(*ref))
         n_missed = np.isnan(ye_ref).sum()
         if n_missed:
             print(f"{n_missed} of {len(trajs)} tracers never reached T_ref={args.t_ref_gk} GK "
                   f"(excluded from the *_ref panels).")
         if 'Ye_ref' in args.panels:
             panel_values['Ye_ref'] = ye_ref
-        if 's_ref' in args.panels:
-            panel_values['s_ref'] = s_ref
         if 'tau_ref' in args.panels:
             panel_values['tau_ref'] = tau_ref * units.time_ms
 
@@ -258,7 +262,6 @@ def main() -> None:
     labels = {
         'Tmax': (r"$T_{\rm max}$ (GK)", False),
         'Ye_ref': (rf"$Y_e$ at {args.t_ref_gk:g} GK", False),
-        's_ref': (rf"$s$ at {args.t_ref_gk:g} GK ($k_{{\rm B}}$)", False),
         'tau_ref': (rf"$\tau_{{\rm exp}}$ at {args.t_ref_gk:g} GK (ms)", True),
         'theta_final': (r"$\theta_{\rm final}$ (deg)", False),
         'phi_final': (r"$\phi_{\rm final}$ (deg)", False),

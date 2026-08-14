@@ -30,7 +30,6 @@ FIELD_REGISTRY = {
     'theta':  (r"theta (deg)",             lambda tr, u: tr.data['theta'],                  False),
     'phi':    (r"phi (deg)",                lambda tr, u: tr.data['phi'],                    False),
     'rho_r3': (r"$\rho r^3$ ($M_\odot$)",  lambda tr, u: tr.data['rho'] * tr.data['r']**3,  True),
-    's':      (r"s ($k_{\rm B}$)",         lambda tr, u: tr.data['s'],                       False),
     'Ye':     (r"$Y_e$",                    lambda tr, u: tr.data['r_0'],                     False),
     'T':      (r"T (GK)",                   lambda tr, u: tr.data['T'] * u.temperature_gk,   False),
     'rho':    (r"$\rho$ (g/cm$^3$)",       lambda tr, u: tr.data['rho'] * u.density_cgs,     True),
@@ -50,7 +49,7 @@ def parse_args() -> argparse.Namespace:
                          help="Number of tracers to randomly sample and plot.")
     parser.add_argument('--seed', type=int, default=None,
                          help="RNG seed for the random sample (default: nondeterministic).")
-    parser.add_argument('--fields', nargs='+', default=['r', 'phi', 'theta', 'rho_r3', 's', 'Ye'],
+    parser.add_argument('--fields', nargs='+', default=['r', 'phi', 'theta', 'rho_r3', 'T', 'Ye'],
                          choices=list(FIELD_REGISTRY), help="Fields to plot, one panel each.")
     parser.add_argument('--color-by', default='theta', choices=list(FIELD_REGISTRY),
                          help="Colour each tracer's lines by its average value of this field.")

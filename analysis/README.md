@@ -31,6 +31,17 @@ Beyond the core pipeline's dependencies (see the root `README.md`):
   `mass_conservation.py`'s `--raw-sim-dir` ground-truth cross-check only;
   everything else works without it.
 
+## A note on entropy
+
+None of these scripts read or plot entropy, and it is not in any format's
+default `--keys`.  Not every data source dumps it (AthenaK does not), and
+carrying it through the pipeline buys nothing that cannot be recovered
+afterwards: evaluating the EOS along each tracer's recorded
+`(rho, T, Ye)` history gives the entropy, and gives it consistently with
+whatever EOS the network run uses.  So if you need `s_ref` for the
+standard `Ye`/`s`/`tau` triplet, compute it at that point rather than
+asking the pipeline to advect it.
+
 ## `plot_trajectories.py`
 
 Randomly samples `--n-sample` tracers and plots each requested `--fields`
@@ -40,7 +51,7 @@ do fields evolve as expected, are there obvious outliers? Available
 fields (see `FIELD_REGISTRY` in the script): `r`, `theta`, `phi`,
 `rho_r3` (`rho*r**3`, a mass proxy -- see the root README's "Units"
 section for why this comes out in `M_sun` directly from raw code-unit
-`rho`/`r`), `s`, `Ye`, `T`, `rho`, `v` (velocity magnitude), `u_t`.
+`rho`/`r`), `Ye`, `T`, `rho`, `v` (velocity magnitude), `u_t`.
 
 ## `animate.py`
 
@@ -135,8 +146,7 @@ kinematics:
 |---|---|
 | `Tmax` | Peak temperature reached (GK). |
 | `Ye_ref` | Electron fraction at the reference ("NSE dropout") temperature `--t-ref-gk` (default 5 GK) -- the standard proxy for a tracer's final nucleosynthesis composition, since weak rates freeze out around there. |
-| `s_ref` | Entropy at the same reference temperature. |
-| `tau_ref` | Expansion timescale (`rho / |drho/dt|`, ms) at the same reference temperature. Together, `Ye_ref`/`s_ref`/`tau_ref` are the standard triplet of parameters characterizing r-process nucleosynthesis outcome. |
+| `tau_ref` | Expansion timescale (`rho / |drho/dt|`, ms) at the same reference temperature. `Ye_ref`/`tau_ref`, together with the entropy, are the standard triplet of parameters characterizing r-process nucleosynthesis outcome -- see the note on entropy above. |
 | `theta_final`, `phi_final` | Angular position at the tracer's final recorded time -- where the ejecta ends up. |
 | `r_final` | Radius at the final recorded time. |
 | `v_final` | Final coordinate speed `|v|`, overlaid with the *asymptotic* velocity implied by two different conserved-energy criteria: geodesic (`-u_t`, gravity only) and, if `hu_t` is present, Bernoulli (`-h*u_t`, also lets thermal/internal energy unbind or accelerate a tracer). Each curve's legend entry reports the mass fraction it represents, since a criterion that leaves most tracers bound will produce a much smaller-looking curve even where its shape is otherwise unremarkable. |
@@ -157,7 +167,7 @@ out).
 
 Select a subset with `--panels` (default: all of the above).
 
-**Other panels worth adding, not yet implemented:** a 2-D `Ye`-`s`
+**Other panels worth adding, not yet implemented:** a 2-D `Ye`-entropy
 histogram (or `theta` vs. `Ye`, to see equatorial/polar composition
 differences directly) instead of two separate 1-D ones; a mass-weighted
 histogram of injection/seed time (particularly informative for the

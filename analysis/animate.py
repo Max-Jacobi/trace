@@ -28,7 +28,6 @@ from analysis._common import add_tracer_loading_args, load_trajectories, get_uni
 FIELD_LABELS = {
     'r_0': r"$Y_e$",
     'T': "T (GK)",
-    's': r"s ($k_{\rm B}$)",
     'rho': r"$\rho$ (g/cm$^3$)",
 }
 

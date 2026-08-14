@@ -35,7 +35,7 @@ from src.seeds import spherical_by_volume, spherical_surface_by_area
 
 DEFAULT_KEYS = (
     'V_u_x', 'V_u_y', 'V_u_z',
-    'T', 'hu_t', 's',
+    'T', 'hu_t',
     'u_t', 'rho', 'r_0',
     'F_nue', 'F_anue', 'F_nux',
     'eps_nue', 'eps_anue', 'eps_nux',
