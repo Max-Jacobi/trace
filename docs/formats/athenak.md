@@ -141,13 +141,29 @@ Gauss-Legendre quadrature over each tracer's cell.
   keys if not, rather than integrating through a stale buffer. Either trim
   `--keys`, or point `--data-dir` at a directory holding only the times
   that carry all of them.
-- **Non-finite values are rejected at load.** Interpolation needs finite
-  data everywhere, so a field carrying `inf` or `NaN` raises a `ValueError`
-  naming the file, the field and the affected fraction. This is worth
-  knowing about for the ratio-derived quantities: the mean neutrino
-  energies `e:0..3` are `inf` wherever the neutrino number density they
-  divide by vanishes, which in an early snapshot is most of the domain.
-  Until the dumps guard that division, drop `eps_*` from `--keys`.
+- **The mean neutrino energies carry garbage where there are no
+  neutrinos.** `e:0..3` are computed as `J/n`, so wherever the number
+  density vanishes they carry no information -- arriving as `inf`, or as a
+  finite number up to the float32 ceiling of 3e38, depending on how far the
+  denominator underflowed. On the shipped dumps that is ~30% and ~17% of
+  the grid respectively.
+
+  The reader replaces anything non-finite or beyond `FIELD_MAX_ABS` (in
+  `src/athenak.py`) with zero on load, and prints one warning per file and
+  field saying how much it replaced. Where the flux is real the data is
+  clean: measured on these dumps, every cell with a non-negligible number
+  flux has a finite mean energy no larger than 7.8e-5.
+
+  The bound is not trying to tell good samples from bad, which a magnitude
+  test cannot do -- 22% of the no-flux cells carry a perfectly
+  physical-looking value. It does not need to. Those are harmless, since
+  the flux they multiply downstream vanishes there. What has to go is the
+  extreme tail, because the interpolation stencil of a tracer just inside
+  the neutrino-carrying region reaches across the boundary and one such
+  neighbour would swamp it. The bound caps that bleed at the same order as
+  the physical signal.
+
+  Guarding the division in the dumps would make all of this unnecessary.
 - **Four neutrino species, not three.** The default `--keys` carries
   `*_anux` in addition to GR-Athena++'s three. Confirm the species ordering
   of `e:0..3` / `|F|:0..3` against your input file before reading physics

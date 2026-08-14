@@ -588,6 +588,13 @@ of the things that fail silently if you get them wrong.
   schemes, 4 for `rk4`). Raise `--files-per-step`, or lower
   `--max-tot-memory-gb`'s implied snapshot count some other way (fewer
   `--keys`, fewer `--n-cpu`).
+- **`WARNING: ... samples non-finite or |value| > X ... replaced with 0.0`**:
+  a field in your snapshots carries values it cannot mean -- typically a
+  quantity derived as a ratio, which blows up wherever its denominator
+  vanishes. The reader substitutes zero there and carries on. Check the
+  reported fraction against where you expect that field to be meaningful;
+  if it is being replaced somewhere it matters, the dump needs fixing, not
+  the pipeline.
 - **`KeyError: Not every requested key is available at every snapshot time
   in ...`**: a `--keys` entry is missing from at least one snapshot. The
   message lists the offending times and the keys that *were* found

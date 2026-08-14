@@ -535,3 +535,4 @@ class TestCartesianToSpherical:
             tracers = np.array([_make_tracer(i, p) for i, p in enumerate(positions)])
             sorted_tr = interp.sort_tracers(tracers)
             assert len(sorted_tr) == len(tracers)
+

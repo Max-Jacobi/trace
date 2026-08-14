@@ -426,3 +426,117 @@ class TestRealFiles:
         gaps = {t: sorted(everything - have) for t, have in per_time.items()
                 if have != everything}
         assert not gaps, f"fields missing at some times: {gaps}"
+
+
+class TestUnusableSamples:
+    """
+    AthenaK's mean neutrino energies are J/n, so wherever the number
+    density vanishes they carry no information -- arriving either as inf,
+    or as a finite number up to the float32 ceiling depending on how far
+    the denominator underflowed.  Both have to go, and substituting is
+    right rather than masking, because the flux they multiply downstream is
+    vanishing there anyway.
+    """
+
+    def _dataset(self, tmp_path, junk):
+        r, th, ph = athenak_grid(12, 10, 16)
+        field = sample_field(r, th, ph)
+        broken = field.copy() * 1e-6          # a plausible mean-energy scale
+        broken[5, 4, ::3] = junk
+        for i_t, time in enumerate([0.0, 10.0]):
+            write_athenak_vtk(str(tmp_path / f"a.{i_t}.vtk"), r, th, ph, time,
+                              {"dens": field, "e:0": broken})
+        return r, th, ph, field, broken
+
+    def _load(self, tmp_path):
+        fh = AthenaKFileHandler(
+            interpolator=PchipInterpolator3D, directory=str(tmp_path),
+            keys=["rho", "eps_nue"], n_cpu=1, files_per_step=2,
+            interpolator_kwargs={"max_cache_size_GB": 0.05},
+        )
+        fh.load_chunk(0, forward=True)
+        return fh
+
+    @pytest.mark.parametrize(
+        "junk", [np.inf, -np.inf, np.nan, 3.4e38, -3.4e38, 1e-2],
+        ids=["inf", "-inf", "nan", "float32_max", "-float32_max", "merely_absurd"],
+    )
+    def test_unusable_samples_are_replaced(self, tmp_path, capsys, junk):
+        """
+        A finite but absurd value is just as unusable as an inf, and is the
+        case a plain isfinite() check misses.
+        """
+        from src.athenak import SANE_FILL, _warned_nonfinite
+        _warned_nonfinite.clear()
+        r, th, ph, field, broken = self._dataset(tmp_path, junk)
+
+        fh = self._load(tmp_path)
+        try:
+            assert "replaced" in capsys.readouterr().out
+            ng = PchipInterpolator3D.n_ghosts
+            from multiprocessing.shared_memory import SharedMemory
+            shm = SharedMemory(name=fh.shared_memory[0]["eps_nue"])
+            try:
+                buf = np.ndarray(fh.extra_data["shape"], dtype=np.float64,
+                                 buffer=shm.buf).copy()
+            finally:
+                shm.close()
+        finally:
+            fh.free_shared_memory()
+
+        interior = buf[:, ng:-ng, ng:-ng]
+        bad = ~np.isfinite(broken) | (np.abs(broken) > 1e-3)
+        assert bad.any(), "the test data should contain unusable samples"
+        np.testing.assert_array_equal(interior[bad], SANE_FILL)
+        np.testing.assert_allclose(interior[~bad], broken[~bad], rtol=1e-5)
+
+    def test_plausible_values_are_left_alone(self, tmp_path):
+        """The clamp must not touch data inside the physical range."""
+        from src.athenak import _warned_nonfinite
+        _warned_nonfinite.clear()
+        r, th, ph, field, broken = self._dataset(tmp_path, 1e-7)   # small, valid
+        fh = self._load(tmp_path)
+        try:
+            ng = PchipInterpolator3D.n_ghosts
+            from multiprocessing.shared_memory import SharedMemory
+            shm = SharedMemory(name=fh.shared_memory[0]["eps_nue"])
+            try:
+                buf = np.ndarray(fh.extra_data["shape"], dtype=np.float64,
+                                 buffer=shm.buf).copy()
+            finally:
+                shm.close()
+        finally:
+            fh.free_shared_memory()
+        np.testing.assert_allclose(buf[:, ng:-ng, ng:-ng], broken, rtol=1e-5)
+
+    def test_a_field_without_a_bound_keeps_large_values(self, tmp_path):
+        """
+        Only keys listed in FIELD_MAX_ABS are range-checked; a large density
+        is a physical statement, not a broken sample.
+        """
+        from src.athenak import FIELD_MAX_ABS
+        assert "rho" not in FIELD_MAX_ABS
+        r, th, ph = athenak_grid(12, 10, 16)
+        field = sample_field(r, th, ph)
+        field[3, 3, 3] = 1e6
+        for i_t, time in enumerate([0.0, 10.0]):
+            write_athenak_vtk(str(tmp_path / f"a.{i_t}.vtk"), r, th, ph, time,
+                              {"dens": field})
+        fh = AthenaKFileHandler(
+            interpolator=PchipInterpolator3D, directory=str(tmp_path),
+            keys=["rho"], n_cpu=1, files_per_step=2,
+            interpolator_kwargs={"max_cache_size_GB": 0.05},
+        )
+        try:
+            fh.load_chunk(0, forward=True)
+            ng = PchipInterpolator3D.n_ghosts
+            from multiprocessing.shared_memory import SharedMemory
+            shm = SharedMemory(name=fh.shared_memory[0]["rho"])
+            try:
+                buf = np.ndarray(fh.extra_data["shape"], dtype=np.float64,
+                                 buffer=shm.buf).copy()
+            finally:
+                shm.close()
+        finally:
+            fh.free_shared_memory()
+        assert buf[3, ng + 3, ng + 3] == pytest.approx(1e6, rel=1e-5)

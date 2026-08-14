@@ -15,6 +15,7 @@ AthenaK Module
   same time.
 """
 
+import os
 import signal
 from typing import Any
 from multiprocessing.shared_memory import SharedMemory
@@ -163,6 +164,76 @@ def read_grid(file_path: str, info: dict[str, Any]) -> tuple[np.ndarray, np.ndar
             f"{file_path}'s POINTS are not a separable (r, theta, phi) product grid."
         )
     return r, th, ph
+
+
+# (file, field) pairs already reported, so a field is not re-reported on
+# every chunk load.  Per process, so a worker pool may repeat it once each.
+_warned_nonfinite: set[tuple[str, str]] = set()
+
+
+SANE_FILL = 0.0
+
+# Largest magnitude a field can physically take, by canonical key.  Samples
+# outside this (and any non-finite ones) are replaced by SANE_FILL on load.
+#
+# Only the neutrino mean energies need this, because they are computed as
+# J/n and so carry no information wherever the number density vanishes --
+# there they come out as inf, or as a finite number up to the float32
+# ceiling, depending on whether the denominator underflowed all the way.
+#
+# The bound is not trying to separate the good samples from the bad, which
+# a magnitude test cannot do: measured on the shipped dumps, 22% of the
+# no-flux cells carry a value that looks perfectly physical.  It does not
+# need to.  Those are harmless, since the flux they are multiplied by
+# downstream is vanishing there.  What has to go is the extreme tail --
+# values up to 3e38 -- because the interpolation stencil of a tracer just
+# inside the neutrino-carrying region reaches across the boundary, and one
+# such neighbour would swamp it.  Capping the magnitude caps that bleed.
+#
+# Observed physical values run to 7.8e-5 in these dumps and 1.5e-4 in the
+# earlier late-time ones, so 1e-3 leaves roughly a factor 7 of headroom
+# while bounding any bleed to the same order as the physical signal.
+# This is the one number to change if that headroom is wrong.
+FIELD_MAX_ABS = {
+    'eps_nue': 1e-3,
+    'eps_anue': 1e-3,
+    'eps_nux': 1e-3,
+    'eps_anux': 1e-3,
+}
+
+
+def _sanitise(path: str, key: str, field: str, values: np.ndarray) -> np.ndarray:
+    """
+    Replace unusable samples with ``SANE_FILL``, reporting once per field.
+
+    Unusable means non-finite, or beyond this key's entry in
+    ``FIELD_MAX_ABS`` if it has one.  Substituting rather than masking is
+    deliberate: these samples sit where the field carries no information
+    and is multiplied by a vanishing flux downstream, so masking would only
+    hand a tracer near the boundary a real flux with a NaN energy to go
+    with it, which is worse than a value on its way to zero along with the
+    flux.
+    """
+    bad = ~np.isfinite(values)
+    limit = FIELD_MAX_ABS.get(key)
+    if limit is not None:
+        bad |= np.abs(values) > limit
+    n_bad = int(np.count_nonzero(bad))
+    if not n_bad:
+        return values
+
+    seen = (path, field)
+    if seen not in _warned_nonfinite:
+        _warned_nonfinite.add(seen)
+        bound = "non-finite" if limit is None else f"non-finite or |value| > {limit:g}"
+        print(
+            f"WARNING: {os.path.basename(path)}: field '{field}' has {n_bad} of "
+            f"{values.size} samples {bound} ({100 * n_bad / values.size:.1f}%), "
+            f"replaced with {SANE_FILL}. Check that this field is only unusable "
+            f"where its value cannot matter.",
+            flush=True,
+        )
+    return np.where(bad, SANE_FILL, values)
 
 
 def polar_axis(th: np.ndarray) -> tuple[str, np.ndarray, bool, bool]:
@@ -336,20 +407,7 @@ class AthenaKFileHandler(FileHandler):
                 # File order is phi-slowest, r-fastest; the interpolator
                 # wants (r, polar, phi) with the polar axis ascending.
                 ar = read_block(path, offset, n_cells, dtype)
-                # Checked here rather than several layers down inside
-                # scipy.interpolate, which reports only "`y` must contain
-                # only finite values" and names neither the field nor the
-                # file.  A ratio-derived field (a mean energy, say) is an
-                # easy way to end up with inf wherever its denominator
-                # vanishes.
-                n_bad = int(np.count_nonzero(~np.isfinite(ar)))
-                if n_bad:
-                    raise ValueError(
-                        f"{path}: field '{FIELD_MAP.get(key, key)}' has {n_bad} of "
-                        f"{n_cells} values non-finite ({100 * n_bad / n_cells:.1f}%). "
-                        f"Interpolation needs finite data everywhere, so either fix "
-                        f"the dump or drop '{key}' from --keys."
-                    )
+                ar = _sanitise(path, key, FIELD_MAP.get(key, key), ar)
                 ar = ar.reshape(n_ph, n_th, n_r).transpose(2, 1, 0)
                 if extra_data['flip_polar']:
                     ar = ar[:, ::-1, :]
