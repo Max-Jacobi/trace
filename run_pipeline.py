@@ -277,14 +277,14 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
     )
 
 
-def write_output(tracers, output_dir: str) -> None:
+def write_output(tracers, output_dir: str, density_key: str = 'rho') -> None:
     os.makedirs(output_dir, exist_ok=True)
     filebase = f"{output_dir}/tracer_"
 
     for tr in tracers.tracers:
         if 'dV' in tr.props:
             i_tmax = np.argmax(tr.times)
-            tr.props['mass'] = tr.props['dV'] * tr.data['rho'][i_tmax]
+            tr.props['mass'] = tr.props['dV'] * tr.data[density_key][i_tmax]
 
         # Strip any dotted group prefix ("group.field" -> "field") from data keys.
         short_keys = {key: key.split(".")[-1] for key in tr.data.keys()}
@@ -313,7 +313,7 @@ def main() -> None:
     tracers = seed_tracers(args, integrator, file_handler)
     tracers.integrate(args.start_t, args.end_t)
 
-    write_output(tracers, args.output_dir)
+    write_output(tracers, args.output_dir, args.density_key)
 
 
 if __name__ == "__main__":
