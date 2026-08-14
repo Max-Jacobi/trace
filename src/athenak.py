@@ -194,6 +194,15 @@ SANE_FILL = 0.0
 # earlier late-time ones, so 1e-3 leaves roughly a factor 7 of headroom
 # while bounding any bleed to the same order as the physical signal.
 # This is the one number to change if that headroom is wrong.
+#
+# In physical units, e = J/n mixes conventions: AthenaK carries J in code
+# (geometric) units and n in EOS units, which are fm^-3.  So
+#
+#     e[MeV] = e[code] * 5.550715e38 / 1e39 / 1.602176634e-6
+#            = e[code] * 3.4645e5
+#
+# putting the median <E_nue> in these dumps at 10.5 MeV and this bound at
+# roughly 346 MeV.
 FIELD_MAX_ABS = {
     'eps_nue': 1e-3,
     'eps_anue': 1e-3,
