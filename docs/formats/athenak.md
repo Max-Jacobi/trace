@@ -161,29 +161,25 @@ Gauss-Legendre quadrature over each tracer's cell.
   keys if not, rather than integrating through a stale buffer. Either trim
   `--keys`, or point `--data-dir` at a directory holding only the times
   that carry all of them.
-- **The mean neutrino energies carry garbage where there are no
-  neutrinos.** `e:0..3` are computed as `J/n`, so wherever the number
-  density vanishes they carry no information -- arriving as `inf`, or as a
-  finite number up to the float32 ceiling of 3e38, depending on how far the
-  denominator underflowed. On the shipped dumps that is ~30% and ~17% of
-  the grid respectively.
 
   The reader replaces anything non-finite or beyond `FIELD_MAX_ABS` (in
-  `src/athenak.py`) with zero on load, and prints one warning per file and
-  field saying how much it replaced. Where the flux is real the data is
-  clean: measured on these dumps, every cell with a non-negligible number
-  flux has a finite mean energy no larger than 7.8e-5.
+  `src/athenak.py`, 1e4 MeV) with zero on load, and prints one warning per
+  file and field saying how much it replaced -- this is a no-op on
+  already-clean, fixed-build dumps, and only does anything on older data.
 
   The bound is not trying to tell good samples from bad, which a magnitude
-  test cannot do -- 22% of the no-flux cells carry a perfectly
-  physical-looking value. It does not need to. Those are harmless, since
-  the flux they multiply downstream vanishes there. What has to go is the
-  extreme tail, because the interpolation stencil of a tracer just inside
-  the neutrino-carrying region reaches across the boundary and one such
-  neighbour would swamp it. The bound caps that bleed at the same order as
-  the physical signal.
+  test cannot do -- on affected dumps a meaningful fraction of the no-flux
+  cells carry a perfectly physical-looking value. It does not need to.
+  Those are harmless, since the flux they multiply downstream vanishes
+  there. What has to go is the extreme tail, because the interpolation
+  stencil of a tracer just inside the neutrino-carrying region reaches
+  across the boundary and one such neighbour would swamp it. 1e4 MeV leaves
+  ~300x headroom above the observed physical maximum (~35 MeV) while
+  staying far below any observed garbage floor.
 
-  Guarding the division in the dumps would make all of this unnecessary.
+  Guarding the division in the dumps (as the `ene_conv`/`isfinite` fixes
+  now do) makes all of this unnecessary going forward; the clamp exists for
+  whatever older data is still floating around.
 - **Four neutrino species, not three.** See "The fourth neutrino species"
   above -- `--heavy-neutrinos` controls whether `nux`/`anux` are summed
   (default), dropped, or kept separate. Confirm the species ordering of

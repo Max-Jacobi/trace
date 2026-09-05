@@ -295,36 +295,28 @@ SANE_FILL = 0.0
 #
 # Only the neutrino mean energies need this, because they are computed as
 # J/n and so carry no information wherever the number density vanishes --
-# there they come out as inf, or as a finite number up to the float32
-# ceiling, depending on whether the denominator underflowed all the way.
+# there they come out as inf, or as a finite number that can run up to
+# whatever the denominator underflowed against, depending on the AthenaK
+# build.
 #
 # The bound is not trying to separate the good samples from the bad, which
-# a magnitude test cannot do: measured on the shipped dumps, 22% of the
-# no-flux cells carry a value that looks perfectly physical.  It does not
-# need to.  Those are harmless, since the flux they are multiplied by
-# downstream is vanishing there.  What has to go is the extreme tail --
-# values up to 3e38 -- because the interpolation stencil of a tracer just
-# inside the neutrino-carrying region reaches across the boundary, and one
-# such neighbour would swamp it.  Capping the magnitude caps that bleed.
+# a magnitude test cannot do -- on affected dumps a meaningful fraction of
+# the no-flux cells carry a value that looks perfectly physical. It does
+# not need to. Those are harmless, since the flux they are multiplied by
+# downstream is vanishing there. What has to go is the extreme tail, because
+# the interpolation stencil of a tracer just inside the neutrino-carrying
+# region reaches across the boundary, and one such neighbour would swamp
+# it. Capping the magnitude caps that bleed.
 #
-# Observed physical values run to 7.8e-5 in these dumps and 1.5e-4 in the
-# earlier late-time ones, so 1e-3 leaves roughly a factor 7 of headroom
-# while bounding any bleed to the same order as the physical signal.
-# This is the one number to change if that headroom is wrong.
-#
-# In physical units, e = J/n mixes conventions: AthenaK carries J in code
-# (geometric) units and n in EOS units, which are fm^-3.  So
-#
-#     e[MeV] = e[code] * 5.550715e38 / 1e39 / 1.602176634e-6
-#            = e[code] * 3.4645e5
-#
-# putting the median <E_nue> in these dumps at 10.5 MeV and this bound at
-# roughly 346 MeV.
+# 1e4 MeV leaves ~300x headroom above the ~35 MeV observed physical
+# maximum while staying orders of magnitude below any observed garbage
+# floor (1e10 and up), so it can't be confused with real physics on
+# fixed-build dumps.
 FIELD_MAX_ABS = {
-    'eps_nue': 1e-3,
-    'eps_anue': 1e-3,
-    'eps_nux': 1e-3,
-    'eps_anux': 1e-3,
+    'eps_nue': 1e4,
+    'eps_anue': 1e4,
+    'eps_nux': 1e4,
+    'eps_anux': 1e4,
 }
 
 

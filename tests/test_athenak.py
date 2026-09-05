@@ -448,7 +448,7 @@ class TestUnusableSamples:
     def _dataset(self, tmp_path, junk):
         r, th, ph = athenak_grid(12, 10, 16)
         field = sample_field(r, th, ph)
-        broken = field.copy() * 1e-6          # a plausible mean-energy scale
+        broken = field.copy() * 15.0
         broken[5, 4, ::3] = junk
         for i_t, time in enumerate([0.0, 10.0]):
             write_athenak_vtk(str(tmp_path / f"a.{i_t}.vtk"), r, th, ph, time,
@@ -466,7 +466,7 @@ class TestUnusableSamples:
         return fh
 
     @pytest.mark.parametrize(
-        "junk", [np.inf, -np.inf, np.nan, 3.4e38, -3.4e38, 1e-2],
+        "junk", [np.inf, -np.inf, np.nan, 3.4e38, -3.4e38, 5e4],
         ids=["inf", "-inf", "nan", "float32_max", "-float32_max", "merely_absurd"],
     )
     def test_unusable_samples_are_replaced(self, tmp_path, capsys, junk):
@@ -474,7 +474,7 @@ class TestUnusableSamples:
         A finite but absurd value is just as unusable as an inf, and is the
         case a plain isfinite() check misses.
         """
-        from src.athenak import SANE_FILL, _warned_nonfinite
+        from src.athenak import FIELD_MAX_ABS, SANE_FILL, _warned_nonfinite
         _warned_nonfinite.clear()
         r, th, ph, field, broken = self._dataset(tmp_path, junk)
 
@@ -493,7 +493,7 @@ class TestUnusableSamples:
             fh.free_shared_memory()
 
         interior = buf[:, ng:-ng, ng:-ng]
-        bad = ~np.isfinite(broken) | (np.abs(broken) > 1e-3)
+        bad = ~np.isfinite(broken) | (np.abs(broken) > FIELD_MAX_ABS["eps_nue"])
         assert bad.any(), "the test data should contain unusable samples"
         np.testing.assert_array_equal(interior[bad], SANE_FILL)
         np.testing.assert_allclose(interior[~bad], broken[~bad], rtol=1e-5)
@@ -502,7 +502,7 @@ class TestUnusableSamples:
         """The clamp must not touch data inside the physical range."""
         from src.athenak import _warned_nonfinite
         _warned_nonfinite.clear()
-        r, th, ph, field, broken = self._dataset(tmp_path, 1e-7)   # small, valid
+        r, th, ph, field, broken = self._dataset(tmp_path, 12.5)
         fh = self._load(tmp_path)
         try:
             ng = PchipInterpolator3D.n_ghosts
@@ -659,8 +659,8 @@ class TestHeavyNeutrinos:
         rng = np.random.default_rng(0)
         f2 = rng.uniform(1e-3, 1.0, shape)
         f3 = rng.uniform(1e-3, 1.0, shape)
-        e2 = rng.uniform(1e-6, 1e-5, shape)
-        e3 = rng.uniform(1e-6, 1e-5, shape)
+        e2 = rng.uniform(5.0, 30.0, shape)
+        e3 = rng.uniform(5.0, 30.0, shape)
         self._write(tmp_path, e2, e3, f2, f3)
 
         fh = self._load(tmp_path, ["F_nux", "eps_nux"], "sum")
@@ -708,10 +708,8 @@ class TestHeavyNeutrinos:
     def test_separate_keeps_species_distinct(self, tmp_path):
         r, th, ph = athenak_grid(6, 8, 8)
         shape = (len(r), len(th), len(ph))
-        # Within FIELD_MAX_ABS's eps ceiling (1e-3) -- a real physical value,
-        # not one _sanitise is supposed to clip.
-        e2 = np.full(shape, 3e-4)
-        e3 = np.full(shape, 5e-4)
+        e2 = np.full(shape, 12.3)
+        e3 = np.full(shape, 18.7)
         zeros = np.zeros(shape)
         self._write(tmp_path, e2, e3, zeros, zeros)
 
