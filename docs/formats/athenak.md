@@ -66,10 +66,30 @@ python run_pipeline.py --format athenak \
 |---|---|
 | `--file-pattern` | `*.vtk` |
 | `--rad-transform` | `log` (the radial grid is geometrically spaced) |
-| `--keys` | `V_u_x V_u_y V_u_z T u_t rho r_0 F_nue F_anue F_nux F_anux eps_nue eps_anue eps_nux eps_anux` |
+| `--keys` | `V_u_x V_u_y V_u_z T u_t rho r_0 F_nue F_anue F_nux eps_nue eps_anue eps_nux` |
+| `--heavy-neutrinos` | `sum` (see below) |
 
 See the [main README](../../README.md#step-2-run-the-pipeline) for every
 other option.
+
+### The fourth neutrino species
+
+AthenaK's M1 radiation evolves 4 species, `[nue, anue, nux, anux]`;
+GR-Athena++ evolves only 3, with `nux` already lumping all heavy leptons
+together at the evolution level. `--heavy-neutrinos` (athenak format only)
+controls how the mismatch is resolved, via `_build_key_specs` in
+`src/athenak.py`:
+
+| Mode | Behaviour |
+|---|---|
+| `sum` *(default)* | `nux`+`anux` folded into one GRA-style `nux`. `F_nux` (extensive) is summed; `eps_nux` (intensive) is a number-flux-weighted average instead, so a vacuum species can't poison it. |
+| `drop` | `eps_nux`/`F_nux`/`eps_anux`/`F_anux` are not resolved at all -- omit them from `--keys` under this mode. |
+| `separate` | All 4 species kept distinct: `eps_nue/anue/nux/anux`, `F_nue/anue/nux/anux`. |
+
+`sum` is the default so that, with the default `--keys` above, an AthenaK
+run produces the same 3-species key set as `reduced_surface`, making the
+two data sources directly comparable through the rest of the pipeline
+without touching `analysis/`.
 
 ## Grid conventions
 
@@ -164,10 +184,11 @@ Gauss-Legendre quadrature over each tracer's cell.
   the physical signal.
 
   Guarding the division in the dumps would make all of this unnecessary.
-- **Four neutrino species, not three.** The default `--keys` carries
-  `*_anux` in addition to GR-Athena++'s three. Confirm the species ordering
-  of `e:0..3` / `|F|:0..3` against your input file before reading physics
-  into the labels.
+- **Four neutrino species, not three.** See "The fourth neutrino species"
+  above -- `--heavy-neutrinos` controls whether `nux`/`anux` are summed
+  (default), dropped, or kept separate. Confirm the species ordering of
+  `e:0..3` / `|F|:0..3` against your input file before reading physics into
+  the labels.
 - **No `hu_t`.** It is not in the dumps, so the Bernoulli unbound
   criterion is unavailable. `analysis/` skips it when absent, so nothing
   breaks. Entropy is likewise absent and likewise not needed -- see

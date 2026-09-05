@@ -7,12 +7,27 @@ AthenaK Module
 
   The output is a STRUCTURED_GRID whose POINTS are spherical (r, theta, phi)
   triples rather than Cartesian coordinates, with r varying fastest.  The
-  grid is linear in r and uniform in phi; its polar axis may be uniform in
-  theta or in cos(theta), node- or cell-centred, and is detected from the
-  file rather than assumed.  AthenaK writes one variable per file, so a
-  single time step is assembled from several files -- which
-  ``FileHandler.parse_files`` supports by merging all files that report the
-  same time.
+  grid is geometrically (log) spaced in r and uniform in phi; its polar
+  axis may be uniform in theta or in cos(theta), node- or cell-centred, and
+  is detected from the file rather than assumed.  AthenaK writes one
+  variable per file, so a single time step is assembled from several files
+  -- which ``FileHandler.parse_files`` supports by merging all files that
+  report the same time.
+
+  AthenaK's M1 radiation evolves 4 species, [nue, anue, nux, anux].
+  GR-Athena++ evolves only 3, with nux already lumping all heavy species
+  together at the evolution level.  ``AthenaKFileHandler``'s
+  ``heavy_neutrinos`` constructor option controls how the extra species is
+  handled:
+
+    - "sum" (default): combine nux and anux into a single GRA-style "nux".
+      Number flux is extensive and is summed; average energy is intensive
+      and cannot be, so it is combined as a number-flux-weighted average
+      instead (see ``_build_key_specs``).
+    - "drop": nux/anux keys are simply not resolved -- omit them from
+      ``--keys``/``keys`` under this mode.
+    - "separate": all 4 species are kept distinct (eps_nue/anue/nux/anux,
+      F_nue/anue/nux/anux).
 """
 
 import os
@@ -43,7 +58,109 @@ FIELD_MAP = {
     'eps_nue': 'e:0', 'eps_anue': 'e:1', 'eps_nux': 'e:2', 'eps_anux': 'e:3',
 }
 
+# scalar name -> canonical key, for keys that map 1:1. Used to recover the
+# canonical name of whichever key a raw scalar "belongs to" regardless of
+# which output key(s) actually consume it (see _build_key_specs / the
+# heavy_neutrinos combination modes below) -- e.g. FIELD_MAX_ABS is always
+# looked up under "eps_nux" for scalar "e:2", whether it ends up read
+# directly (heavy_neutrinos="separate") or as one half of a weighted
+# average (heavy_neutrinos="sum").
+_REVERSE_FIELD_MAP = {raw: key for key, raw in FIELD_MAP.items()}
+
+# Per-species radiation moments: trace-key prefix -> raw AthenaK scalar
+# prefix. Component i of "<scalar prefix>:i" is species _RAD_SPECIES[i].
+_RAD_PREFIXES = {"eps": "e", "F": "|F|"}
+_RAD_SPECIES = ("nue", "anue", "nux", "anux")
+_HEAVY_SPECIES = ("nux", "anux")
+_HEAVY_NEUTRINO_MODES = ("sum", "drop", "separate")
+
 _VTK_DTYPES = {b'float': '>f4', b'double': '>f8', b'int': '>i4'}
+
+
+def _species_of(key: str) -> tuple[str, str, int] | None:
+    """
+    If ``key`` is a per-species radiation key (``eps_<species>`` or
+    ``F_<species>``), return ``(prefix, species, index)``; otherwise None.
+    """
+    for prefix in _RAD_PREFIXES:
+        marker = f"{prefix}_"
+        if key.startswith(marker):
+            species = key[len(marker):]
+            if species in _RAD_SPECIES:
+                return prefix, species, _RAD_SPECIES.index(species)
+    return None
+
+
+def _build_key_specs(keys: list[str], heavy_neutrinos: str) -> dict[str, tuple]:
+    """
+    Resolve each requested trace key into a spec describing how to compute
+    it from raw AthenaK VTK scalars:
+
+      ("direct", scalar)
+          Read one scalar block as-is.
+      ("sum", scalar_a, scalar_b)
+          Read two scalar blocks and add them (F_nux under
+          heavy_neutrinos="sum").
+      ("weighted_avg", scalar_val_a, scalar_val_b, scalar_weight_a, scalar_weight_b)
+          Number-flux-weighted average of two scalar blocks, weighted by
+          two scalar blocks of the corresponding F key (eps_nux under
+          heavy_neutrinos="sum").
+
+    A key absent from the returned dict is not resolved at all (dropped).
+    """
+    if heavy_neutrinos not in _HEAVY_NEUTRINO_MODES:
+        raise ValueError(
+            f"heavy_neutrinos must be one of {_HEAVY_NEUTRINO_MODES}, got {heavy_neutrinos!r}"
+        )
+
+    specs: dict[str, tuple] = {}
+    for key in keys:
+        species_info = _species_of(key)
+        if species_info is None:
+            specs[key] = ("direct", FIELD_MAP.get(key, key))
+            continue
+
+        prefix, species, idx = species_info
+        scalar_prefix = _RAD_PREFIXES[prefix]
+
+        if species not in _HEAVY_SPECIES or heavy_neutrinos == "separate":
+            specs[key] = ("direct", f"{scalar_prefix}:{idx}")
+        elif heavy_neutrinos == "drop":
+            pass
+        elif heavy_neutrinos == "sum":
+            if species == "anux":
+                continue  # folded into "nux" below; no standalone key
+            i_nux, i_anux = _RAD_SPECIES.index("nux"), _RAD_SPECIES.index("anux")
+            if prefix == "F":
+                specs[key] = (
+                    "sum", f"{scalar_prefix}:{i_nux}", f"{scalar_prefix}:{i_anux}",
+                )
+            else:  # "eps": average energy is intensive, weight by number flux
+                f_prefix = _RAD_PREFIXES["F"]
+                specs[key] = (
+                    "weighted_avg",
+                    f"{scalar_prefix}:{i_nux}", f"{scalar_prefix}:{i_anux}",
+                    f"{f_prefix}:{i_nux}", f"{f_prefix}:{i_anux}",
+                )
+    return specs
+
+
+def _invert_key_specs(key_specs: dict[str, tuple]) -> dict[str, list[str]]:
+    """Raw AthenaK scalar name -> sorted list of trace keys that need it."""
+    by_scalar: dict[str, set[str]] = {}
+    for key, spec in key_specs.items():
+        kind = spec[0]
+        if kind == "direct":
+            scalars = (spec[1],)
+        elif kind == "sum":
+            scalars = (spec[1], spec[2])
+        elif kind == "weighted_avg":
+            scalars = (spec[1], spec[2], spec[3], spec[4])
+        else:
+            raise ValueError(f"Unknown key spec kind {kind!r}")
+        for scalar in scalars:
+            by_scalar.setdefault(scalar, set()).add(key)
+    return {scalar: sorted(keys) for scalar, keys in by_scalar.items()}
 
 
 def scan_vtk(file_path: str) -> dict[str, Any]:
@@ -324,15 +441,23 @@ class AthenaKFileHandler(FileHandler):
         self,
         interpolator: type[InterpolatorBase],
         *args,
-        rad_transform: str | tuple | None = None,
+        rad_transform: str | tuple | None = "log",
         file_pattern: str = "*.vtk",
+        heavy_neutrinos: str = "sum",
         **kwargs,
     ) -> None:
+        if heavy_neutrinos not in _HEAVY_NEUTRINO_MODES:
+            raise ValueError(
+                f"heavy_neutrinos must be one of {_HEAVY_NEUTRINO_MODES}, got {heavy_neutrinos!r}"
+            )
         self.file_pattern = file_pattern
         self.n_ghosts = interpolator.n_ghosts
+        self.heavy_neutrinos = heavy_neutrinos
         super().__init__(interpolator, *args, **kwargs)
         # Transform spec for the radial axis: "log", ("asinh", scale), or None.
-        # AthenaK's radial grid is linear, so None is the right default.
+        # AthenaK's radial grid is geometrically (log) spaced from rmin to
+        # rmax, so "log" is the right default -- see docs/formats/athenak.md.
+        # Older, linearly-spaced dumps need rad_transform="none" explicitly.
         self.extra_data["rad_transform"] = rad_transform
         signal.signal(signal.SIGINT, self.handler)
 
@@ -386,6 +511,10 @@ class AthenaKFileHandler(FileHandler):
         self.extra_data['shape'] = (n_r, n_th + 2 * ng, n_ph + 2 * ng)
         self.extra_data['mem_size'] = int(np.prod(self.extra_data['shape'])) * 8
 
+        key_specs = _build_key_specs(self.keys, self.heavy_neutrinos)
+        self.extra_data['key_specs'] = key_specs
+        self.extra_data['keys_by_scalar'] = _invert_key_specs(key_specs)
+
     @staticmethod
     def parse_file(
         file_path: str,
@@ -393,7 +522,10 @@ class AthenaKFileHandler(FileHandler):
         extra_data: Any = None,
     ) -> tuple[float, str, list[str], int]:
         info = scan_vtk(file_path)
-        avail_keys = [key for key in keys if FIELD_MAP.get(key, key) in info['scalars']]
+        keys_by_scalar = extra_data['keys_by_scalar']
+        avail_keys = sorted({
+            key for scalar in info['scalars'] for key in keys_by_scalar.get(scalar, ())
+        })
         if not avail_keys:
             return 0.0, "", [], 0
         return info['time'], file_path, avail_keys, extra_data['mem_size']
@@ -408,25 +540,64 @@ class AthenaKFileHandler(FileHandler):
         shape = extra_data['shape']
         n_r, n_th, n_ph = extra_data['grid_shape']
         n_cells = n_r * n_th * n_ph
+        key_specs = extra_data['key_specs']
 
-        for path, keys in metadata_dict.items():
-            scalars = scan_vtk(path)['scalars']
-            for key in keys:
-                offset, dtype = scalars[FIELD_MAP.get(key, key)]
+        # Locate every raw scalar this step's files carry, whichever file
+        # each one lives in -- AthenaK writes one variable per file, but a
+        # combined key (see _build_key_specs) may need scalars from two.
+        scalar_locations: dict[str, tuple[str, int, str]] = {}
+        for path in metadata_dict:
+            for name, (offset, dtype) in scan_vtk(path)['scalars'].items():
+                scalar_locations[name] = (path, offset, dtype)
+
+        raw_cache: dict[str, np.ndarray] = {}
+
+        def get_raw(scalar: str) -> np.ndarray:
+            if scalar not in raw_cache:
+                path, offset, dtype = scalar_locations[scalar]
                 # File order is phi-slowest, r-fastest; the interpolator
                 # wants (r, polar, phi) with the polar axis ascending.
-                ar = read_block(path, offset, n_cells, dtype)
-                ar = _sanitise(path, key, FIELD_MAP.get(key, key), ar)
-                ar = ar.reshape(n_ph, n_th, n_r).transpose(2, 1, 0)
-                if extra_data['flip_polar']:
-                    ar = ar[:, ::-1, :]
-                shm = SharedMemory(name=shared_memory[key])
-                try:
-                    buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
-                    fill_spherical_ghosts(buf, ar, ng,
-                                          node_centred=extra_data['node_centred'])
-                finally:
-                    shm.close()
+                flat = read_block(path, offset, n_cells, dtype)
+                ar = flat.reshape(n_ph, n_th, n_r).transpose(2, 1, 0)
+                canonical_key = _REVERSE_FIELD_MAP.get(scalar, scalar)
+                raw_cache[scalar] = _sanitise(path, canonical_key, scalar, ar)
+            return raw_cache[scalar]
+
+        for key in shared_memory:
+            spec = key_specs.get(key)
+            if spec is None:
+                continue
+
+            kind = spec[0]
+            if kind == "direct":
+                ar = get_raw(spec[1])
+            elif kind == "sum":
+                ar = get_raw(spec[1]) + get_raw(spec[2])
+            elif kind == "weighted_avg":
+                _, val_a, val_b, weight_a, weight_b = spec
+                va, vb = get_raw(val_a), get_raw(val_b)
+                wa, wb = get_raw(weight_a), get_raw(weight_b)
+                # A vacuum species (near-zero number flux) can carry a
+                # garbage average energy from an internal 0/0 -- already
+                # sanitised by get_raw above, so it contributes zero rather
+                # than poisoning the average.
+                denom = wa + wb
+                ar = np.divide(
+                    wa * va + wb * vb, denom,
+                    out=np.zeros_like(denom), where=denom > 0,
+                )
+            else:
+                raise ValueError(f"Unknown key spec kind {kind!r}")
+
+            if extra_data['flip_polar']:
+                ar = ar[:, ::-1, :]
+            shm = SharedMemory(name=shared_memory[key])
+            try:
+                buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
+                fill_spherical_ghosts(buf, ar, ng,
+                                      node_centred=extra_data['node_centred'])
+            finally:
+                shm.close()
 
     @staticmethod
     def setup_interpolator(

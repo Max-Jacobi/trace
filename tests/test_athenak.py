@@ -15,6 +15,7 @@ import pytest
 from src.athenak import (
     FIELD_MAP,
     AthenaKFileHandler,
+    _build_key_specs,
     polar_axis,
     read_grid,
     scan_vtk,
@@ -250,6 +251,12 @@ class TestPolarAxis:
 
 class TestFileHandler:
     def _handler(self, directory, keys, **kwargs):
+        # The synthetic fixtures below use a linear r grid (real AthenaK
+        # dumps are log-spaced, see docs/formats/athenak.md), so tests that
+        # don't care about radial spacing opt out of the class's "log"
+        # default explicitly rather than silently feeding it a non-uniform
+        # axis it isn't meant to have.
+        kwargs.setdefault("rad_transform", None)
         return AthenaKFileHandler(
             interpolator=PchipInterpolator3D,
             directory=str(directory),
@@ -453,6 +460,7 @@ class TestUnusableSamples:
             interpolator=PchipInterpolator3D, directory=str(tmp_path),
             keys=["rho", "eps_nue"], n_cpu=1, files_per_step=2,
             interpolator_kwargs={"max_cache_size_GB": 0.05},
+            rad_transform=None,  # synthetic fixture uses a linear r grid
         )
         fh.load_chunk(0, forward=True)
         return fh
@@ -526,6 +534,7 @@ class TestUnusableSamples:
             interpolator=PchipInterpolator3D, directory=str(tmp_path),
             keys=["rho"], n_cpu=1, files_per_step=2,
             interpolator_kwargs={"max_cache_size_GB": 0.05},
+            rad_transform=None,  # synthetic fixture uses a linear r grid
         )
         try:
             fh.load_chunk(0, forward=True)
@@ -540,3 +549,184 @@ class TestUnusableSamples:
         finally:
             fh.free_shared_memory()
         assert buf[3, ng + 3, ng + 3] == pytest.approx(1e6, rel=1e-5)
+
+
+class TestRadTransformDefault:
+    def test_default_is_log(self, tmp_path):
+        """
+        AthenaK's radial grid is geometrically (log) spaced from rmin to
+        rmax (see docs/formats/athenak.md), so that must be the handler's
+        own default -- not just run_pipeline.py's --format=athenak default
+        -- since src/athenak_surface.py's direct-construction precedent
+        (and AthenaKFileHandler itself, pre-fix) shows this class is also
+        meant to be built directly, bypassing the CLI.
+        """
+        make_dataset(tmp_path, times=[0.0, 10.0], keys=("dens",))
+        fh = AthenaKFileHandler(
+            interpolator=PchipInterpolator3D, directory=str(tmp_path),
+            keys=["rho"], n_cpu=1, files_per_step=2,
+            interpolator_kwargs={"max_cache_size_GB": 0.05},
+        )
+        try:
+            assert fh.extra_data["rad_transform"] == "log"
+        finally:
+            fh.free_shared_memory()
+
+
+class TestBuildKeySpecs:
+    """Unit tests for the heavy_neutrinos species-combination logic."""
+
+    def test_light_species_always_direct(self):
+        specs = _build_key_specs(["eps_nue", "F_anue"], "sum")
+        assert specs["eps_nue"] == ("direct", "e:0")
+        assert specs["F_anue"] == ("direct", "|F|:1")
+
+    def test_non_species_keys_use_field_map(self):
+        specs = _build_key_specs(["rho", "T", "raw_pass_through"], "sum")
+        assert specs["rho"] == ("direct", "dens")
+        assert specs["T"] == ("direct", "temperature")
+        # not in FIELD_MAP -> passes through unchanged
+        assert specs["raw_pass_through"] == ("direct", "raw_pass_through")
+
+    def test_sum_combines_heavy_species(self):
+        specs = _build_key_specs(["eps_nux", "eps_anux", "F_nux", "F_anux"], "sum")
+        assert specs["F_nux"] == ("sum", "|F|:2", "|F|:3")
+        assert specs["eps_nux"] == ("weighted_avg", "e:2", "e:3", "|F|:2", "|F|:3")
+        assert "eps_anux" not in specs
+        assert "F_anux" not in specs
+
+    def test_drop_omits_heavy_species(self):
+        specs = _build_key_specs(["rho", "eps_nux", "eps_anux", "F_nux", "F_anux"], "drop")
+        assert set(specs) == {"rho"}
+
+    def test_separate_keeps_all_four(self):
+        specs = _build_key_specs(["eps_nux", "eps_anux", "F_nux", "F_anux"], "separate")
+        assert specs["eps_nux"] == ("direct", "e:2")
+        assert specs["eps_anux"] == ("direct", "e:3")
+        assert specs["F_nux"] == ("direct", "|F|:2")
+        assert specs["F_anux"] == ("direct", "|F|:3")
+
+    def test_rejects_unknown_mode(self):
+        with pytest.raises(ValueError, match="heavy_neutrinos"):
+            _build_key_specs(["rho"], "bogus")
+
+
+class TestHeavyNeutrinos:
+    """
+    End-to-end checks that AthenaKFileHandler actually combines nux/anux
+    the way TestBuildKeySpecs says it resolves them to.
+    """
+
+    def _write(self, tmp_path, e2, e3, f2, f3):
+        r, th, ph = athenak_grid(6, 8, 8)
+        shape = (len(r), len(th), len(ph))
+        zeros = np.zeros(shape)
+        for i_t, time in enumerate([0.0, 10.0]):
+            write_athenak_vtk(
+                str(tmp_path / f"a.rad_m1_e.{i_t:05d}.vtk"), r, th, ph, time,
+                {"e:0": zeros, "e:1": zeros, "e:2": e2, "e:3": e3},
+            )
+            write_athenak_vtk(
+                str(tmp_path / f"a.rad_m1_absF.{i_t:05d}.vtk"), r, th, ph, time,
+                {"|F|:0": zeros, "|F|:1": zeros, "|F|:2": f2, "|F|:3": f3},
+            )
+        return r, th, ph
+
+    def _load(self, tmp_path, keys, heavy_neutrinos):
+        fh = AthenaKFileHandler(
+            interpolator=PchipInterpolator3D, directory=str(tmp_path),
+            keys=list(keys), n_cpu=1, files_per_step=2,
+            interpolator_kwargs={"max_cache_size_GB": 0.05},
+            rad_transform=None,  # synthetic fixture uses a linear r grid
+            heavy_neutrinos=heavy_neutrinos,
+        )
+        fh.load_chunk(0, forward=True)
+        return fh
+
+    def _interior(self, fh, key):
+        ng = PchipInterpolator3D.n_ghosts
+        from multiprocessing.shared_memory import SharedMemory
+        shm = SharedMemory(name=fh.shared_memory[0][key])
+        try:
+            buf = np.ndarray(fh.extra_data["shape"], dtype=np.float64, buffer=shm.buf).copy()
+        finally:
+            shm.close()
+        return buf[:, ng:-ng, ng:-ng]
+
+    def test_sum_combines_flux_and_weighted_average(self, tmp_path):
+        r, th, ph = athenak_grid(6, 8, 8)
+        shape = (len(r), len(th), len(ph))
+        rng = np.random.default_rng(0)
+        f2 = rng.uniform(1e-3, 1.0, shape)
+        f3 = rng.uniform(1e-3, 1.0, shape)
+        e2 = rng.uniform(1e-6, 1e-5, shape)
+        e3 = rng.uniform(1e-6, 1e-5, shape)
+        self._write(tmp_path, e2, e3, f2, f3)
+
+        fh = self._load(tmp_path, ["F_nux", "eps_nux"], "sum")
+        try:
+            np.testing.assert_allclose(self._interior(fh, "F_nux"), f2 + f3, rtol=1e-5)
+            expected_eps = (f2 * e2 + f3 * e3) / (f2 + f3)
+            np.testing.assert_allclose(self._interior(fh, "eps_nux"), expected_eps, rtol=1e-5)
+        finally:
+            fh.free_shared_memory()
+
+    def test_sum_zero_flux_gives_zero_not_nan(self, tmp_path):
+        """A vacuum species' 0/0 average energy must not poison the average."""
+        r, th, ph = athenak_grid(6, 8, 8)
+        shape = (len(r), len(th), len(ph))
+        zeros = np.zeros(shape)
+        e2 = np.full(shape, np.nan)
+        e3 = np.full(shape, np.inf)
+        self._write(tmp_path, e2, e3, zeros, zeros)
+
+        fh = self._load(tmp_path, ["eps_nux"], "sum")
+        try:
+            np.testing.assert_array_equal(self._interior(fh, "eps_nux"), 0.0)
+        finally:
+            fh.free_shared_memory()
+
+    def test_drop_leaves_heavy_keys_unresolved(self, tmp_path):
+        """
+        With no spec at all for a dropped key, FileHandler.parse_files's
+        own missing-key check must catch it (rather than silently leaving
+        its shared-memory buffer uninitialised) -- as long as at least one
+        *other* requested key does resolve, so parse_files gets far enough
+        to compare "found somewhere" against "found at every time" instead
+        of bailing out earlier with "no valid data at all".
+        """
+        r, th, ph = athenak_grid(6, 8, 8)
+        shape = (len(r), len(th), len(ph))
+        zeros = np.zeros(shape)
+        self._write(tmp_path, zeros, zeros, zeros, zeros)
+        for i_t, time in enumerate([0.0, 10.0]):
+            write_athenak_vtk(str(tmp_path / f"a.mhd_w_d.{i_t:05d}.vtk"), r, th, ph, time,
+                              {"dens": sample_field(r, th, ph)})
+        with pytest.raises(KeyError, match="eps_nux"):
+            self._load(tmp_path, ["rho", "eps_nux"], "drop")
+
+    def test_separate_keeps_species_distinct(self, tmp_path):
+        r, th, ph = athenak_grid(6, 8, 8)
+        shape = (len(r), len(th), len(ph))
+        # Within FIELD_MAX_ABS's eps ceiling (1e-3) -- a real physical value,
+        # not one _sanitise is supposed to clip.
+        e2 = np.full(shape, 3e-4)
+        e3 = np.full(shape, 5e-4)
+        zeros = np.zeros(shape)
+        self._write(tmp_path, e2, e3, zeros, zeros)
+
+        fh = self._load(tmp_path, ["eps_nux", "eps_anux"], "separate")
+        try:
+            np.testing.assert_allclose(self._interior(fh, "eps_nux"), e2)
+            np.testing.assert_allclose(self._interior(fh, "eps_anux"), e3)
+        finally:
+            fh.free_shared_memory()
+
+    def test_invalid_mode_rejected_at_construction(self, tmp_path):
+        with pytest.raises(ValueError, match="heavy_neutrinos"):
+            AthenaKFileHandler(
+                interpolator=PchipInterpolator3D, directory=str(tmp_path),
+                keys=["rho"], n_cpu=1, files_per_step=2,
+                interpolator_kwargs={"max_cache_size_GB": 0.05},
+                heavy_neutrinos="bogus",
+            )

@@ -63,16 +63,23 @@ FORMATS = {
     'athenak': {
         'handler': AthenaKFileHandler,
         'file_pattern': '*.vtk',
-        # AthenaK's spherical grid is linear in radius.
-        'rad_transform': 'none',
-        # No entropy and no hu_t in AthenaK's dumps; four neutrino species
-        # instead of three.  See src/athenak.py's FIELD_MAP for how these
-        # canonical names map onto AthenaK's own scalar names.
+        # AthenaK's spherical grid is geometrically (log) spaced in radius,
+        # from rmin to rmax -- see docs/formats/athenak.md. Older dumps used
+        # a linear grid; pass --rad-transform none for those explicitly.
+        'rad_transform': 'log',
+        # No entropy and no hu_t in AthenaK's dumps. AthenaK evolves a 4th
+        # (anux) neutrino species GR-Athena++ doesn't have; the default
+        # --heavy-neutrinos=sum folds it into "nux", so these are the same
+        # 3-species keys as the reduced_surface format -- pass
+        # --heavy-neutrinos=separate and add F_anux/eps_anux to --keys to
+        # keep all 4 species distinct instead. See src/athenak.py's
+        # FIELD_MAP/_build_key_specs for how these map onto AthenaK's own
+        # scalar names.
         'keys': (
             'V_u_x', 'V_u_y', 'V_u_z',
             'T', 'u_t', 'rho', 'r_0',
-            'F_nue', 'F_anue', 'F_nux', 'F_anux',
-            'eps_nue', 'eps_anue', 'eps_nux', 'eps_anux',
+            'F_nue', 'F_anue', 'F_nux',
+            'eps_nue', 'eps_anue', 'eps_nux',
         ),
     },
 }
@@ -113,6 +120,12 @@ def parse_args() -> argparse.Namespace:
                               help="Field keys (subset of --keys) used as the velocity vector.")
     field_group.add_argument('--density-key', default='rho',
                               help="Field key used as mass density for seed-mass integration.")
+    field_group.add_argument('--heavy-neutrinos', choices=['sum', 'drop', 'separate'], default='sum',
+                              help="--format=athenak only: how to handle AthenaK's 4th (anux) "
+                                   "neutrino species, which GR-Athena++ doesn't have. 'sum' folds "
+                                   "nux+anux into one GRA-style nux (number-flux-weighted average "
+                                   "energy); 'drop' omits nux/anux entirely; 'separate' keeps all "
+                                   "4 species distinct. Ignored for --format=reduced_surface.")
 
     perf_group = parser.add_argument_group("performance")
     perf_group.add_argument('--n-cpu', type=int,
@@ -266,7 +279,7 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
     else:
         rad_transform = None
 
-    return FORMATS[args.format]['handler'](
+    common_kwargs = dict(
         interpolator=interpolator_cls,
         directory=args.data_dir,
         keys=list(args.keys),
@@ -278,6 +291,10 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
         file_pattern=args.file_pattern,
         interpolator_kwargs=interpolator_kwargs,
     )
+
+    if args.format == 'athenak':
+        return AthenaKFileHandler(heavy_neutrinos=args.heavy_neutrinos, **common_kwargs)
+    return FORMATS[args.format]['handler'](**common_kwargs)
 
 
 def build_surface_t_start(args: argparse.Namespace, file_handler) -> np.ndarray:

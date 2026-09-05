@@ -1,6 +1,12 @@
+import inspect
 from abc import ABC, abstractmethod
 import numpy as np
 from multiprocessing.shared_memory import SharedMemory
+
+# SharedMemory's `track` kwarg was added in Python 3.13 (bpo-82300); guard it
+# so this still runs under older interpreters (e.g. 3.11), just without the
+# ability to opt out of resource-tracker registration on those versions.
+_SHM_SUPPORTS_TRACK = "track" in inspect.signature(SharedMemory.__init__).parameters
 
 
 def transform_coords(coords, coord_transforms, context="Coordinate"):
@@ -113,7 +119,8 @@ class InterpolatorBase(ABC):
             never responsible for unlinking.
         """
         for key in self.keys:
-            shm = SharedMemory(name=self.shm_names[key], track=track)
+            kwargs = {"track": track} if _SHM_SUPPORTS_TRACK else {}
+            shm = SharedMemory(name=self.shm_names[key], **kwargs)
             self.shm[key] = shm
             self.data[key] = np.ndarray(self.shape, dtype=np.float64, buffer=shm.buf)
         self.loaded = True
