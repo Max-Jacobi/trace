@@ -8,7 +8,7 @@ per-tracer time series are the standard input for nucleosynthesis
 post-processing (e.g. reaction-network codes) of merger ejecta.
 
 Everything except the reader is agnostic about which code produced the
-snapshots. Two formats ship with `trace`, and adding a third means
+snapshots. Three formats ship with `trace`, and adding another means
 implementing one class -- see
 [Supporting a new data format](#supporting-a-new-data-format).
 
@@ -83,6 +83,13 @@ python run_pipeline.py --format athenak \
     --start-t 6120 --end-t 6080 \
     volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
 
+# Athena++ meshblock athdf (written with ghost zones): no preparation step.
+# --start-t must sit at or slightly above the seed snapshot's exact Time.
+python run_pipeline.py --format athdf_spherical \
+    --data-dir /path/to/athdf --output-dir data/tracers_out \
+    --start-t 40.9446 --end-t 0 --bh-mass 1.0 \
+    volume --r-min 305 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
+
 # Each tracer's full history is now one ASCII file:
 ls data/tracers_out/           # tracer_000000.dat, tracer_000001.dat, ...
 ```
@@ -90,13 +97,15 @@ ls data/tracers_out/           # tracer_000000.dat, tracer_000001.dat, ...
 ## Step 1: point it at your data
 
 Pick the format with `--format`. It determines how snapshots are read, and
-sets the defaults for `--file-pattern`, `--rad-transform` and `--keys` --
-which differ between formats because the grids and field names do.
+sets the defaults for `--file-pattern`, `--rad-transform`, `--interpolator`
+and `--keys` -- which differ between formats because the grids and field
+names do.
 
 | `--format` | Data | Preparation | Details |
 |---|---|---|---|
 | `reduced_surface` (default) | GR-Athena++ surface output, HDF5 | Yes -- run `transform_files.py` once per simulation | [docs/formats/gr_athena.md](docs/formats/gr_athena.md) |
 | `athenak` | AthenaK spherical-grid output, binary VTK | None, read directly | [docs/formats/athenak.md](docs/formats/athenak.md) |
+| `athdf_spherical` | Athena++ meshblock output (spherical, with ghost zones), HDF5 | None, read directly | [docs/formats/athdf_spherical.md](docs/formats/athdf_spherical.md) |
 
 Read your format's page before the first run: it lists the field names,
 the grid conventions, and the format-specific caveats. Everything from
@@ -120,7 +129,7 @@ when to change it from its default.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--format` | `reduced_surface` | Snapshot data format; see [Step 1](#step-1-point-it-at-your-data). Also supplies the defaults for `--file-pattern`, `--rad-transform` and `--keys`. |
+| `--format` | `reduced_surface` | Snapshot data format; see [Step 1](#step-1-point-it-at-your-data). Also supplies the defaults for `--file-pattern`, `--rad-transform`, `--interpolator` and `--keys`. |
 | `--data-dir` (required) | -- | Directory of snapshot files. |
 | `--output-dir` | `tracer_output` | Directory to write `tracer_NNNNNN.dat` files to (created if missing). |
 | `--file-pattern` | per `--format` | Glob used to find snapshot files inside `--data-dir`. |
@@ -515,9 +524,12 @@ run_pipeline.py                     (CLI entry point)
         |     |                     to every data source
         |     +-- src/reduced_surface.py  --format reduced_surface
         |     +-- src/athenak.py          --format athenak
+        |     +-- src/athdf_spherical.py   --format athdf (spherical-grid athdf only)
         |     +-- src/gra_surface.py      raw GR-Athena++, not on the CLI
         |
-        +-- src/interpolators/      PchipInterpolator3D, RegularInterpolator3D
+        +-- src/interpolators/      PchipInterpolator3D, RegularInterpolator3D,
+        |                           MeshblockPchipInterpolator (octree block
+        |                           lookup for --format athdf_spherical)
         |                           (+ CartesianToSpherical wrapper, radial
         |                           log/asinh coordinate transforms,
         |                           shared-memory-backed field data)

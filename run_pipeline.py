@@ -36,9 +36,12 @@ import sys
 
 import numpy as np
 
-from src.interpolators import PchipInterpolator3D, RegularInterpolator3D
+from src.interpolators import (
+    PchipInterpolator3D, RegularInterpolator3D, MeshblockPchipInterpolator,
+)
 from src.integrators import ExplicitTrapezoid, ImplicitTrapezoid, RK4
 from src.athenak import AthenaKFileHandler
+from src.athdf_spherical import SphericalAthdfFileHandler
 from src.reduced_surface import ReducedSurfaceFileHandler
 from src.seeds import spherical_by_volume, spherical_surface_by_area
 
@@ -82,6 +85,24 @@ FORMATS = {
             'eps_nue', 'eps_anue', 'eps_nux',
         ),
     },
+    'athdf_spherical': {
+        'handler': SphericalAthdfFileHandler,
+        'file_pattern': '*.athdf',
+        # Interpolation happens on each meshblock's true node coordinates,
+        # so no radial transform applies (the handler rejects one).
+        'rad_transform': 'none',
+        # The meshblock memory layout needs the meshblock interpolator; the
+        # separable-grid interpolators cannot be constructed against it.
+        'interpolator': 'meshblock',
+        # Which output series (out1, out2, ...) carries each variable is
+        # autodetected per file from its VariableNames metadata; files with
+        # none of the requested keys (e.g. cons-only dumps) are skipped.
+        # See src/athdf_spherical.py's FIELD_MAP for the canonical -> raw name map.
+        'keys': (
+            'V_u_x', 'V_u_y', 'V_u_z',
+            'T', 'u_t', 'rho', 'r_0',
+        ),
+    },
 }
 
 INTEGRATOR_N_SNAPSHOTS = {'expl_trap': 2, 'impl_trap': 2, 'rk4': 4}
@@ -98,8 +119,9 @@ def parse_args() -> argparse.Namespace:
     io_group.add_argument('--format', choices=sorted(FORMATS), default='reduced_surface',
                            help="Snapshot data format. 'reduced_surface': transformed "
                                 "GR-Athena++ surface hdf5 (see transform_files.py). "
-                                "'athenak': AthenaK spherical-grid vtk. Sets the defaults "
-                                "for --keys, --file-pattern and --rad-transform.")
+                                "'athenak': AthenaK spherical-grid vtk. 'athdf_spherical': Athena++ "
+                                "spherical meshblock hdf5 (with ghost zones). Sets the defaults "
+                                "for --keys, --file-pattern, --rad-transform and --interpolator.")
     io_group.add_argument('--data-dir', required=True,
                            help="Directory of snapshot files.")
     io_group.add_argument('--output-dir', default='tracer_output',
@@ -126,6 +148,10 @@ def parse_args() -> argparse.Namespace:
                                    "nux+anux into one GRA-style nux (number-flux-weighted average "
                                    "energy); 'drop' omits nux/anux entirely; 'separate' keeps all "
                                    "4 species distinct. Ignored for --format=reduced_surface.")
+    field_group.add_argument('--bh-mass', type=float, default=1.0,
+                              help="--format=athdf_spherical only: black hole mass in code units, used "
+                                   "in the Schwarzschild lapse/metric factors of the velocity "
+                                   "transform (not stored in the athdf metadata).")
 
     perf_group = parser.add_argument_group("performance")
     perf_group.add_argument('--n-cpu', type=int,
@@ -140,8 +166,12 @@ def parse_args() -> argparse.Namespace:
                              help="Print per-file loading progress.")
 
     interp_group = parser.add_argument_group("interpolator")
-    interp_group.add_argument('--interpolator', choices=['pchip', 'regular'], default='pchip',
-                               help="Spatial interpolation scheme.")
+    interp_group.add_argument('--interpolator', choices=['pchip', 'regular', 'meshblock'],
+                               default=None,
+                               help="Spatial interpolation scheme (default: per --format; "
+                                    "'meshblock' for --format=athdf_spherical, 'pchip' otherwise). "
+                                    "The athdf_spherical format's meshblock memory layout only works "
+                                    "with 'meshblock'.")
     interp_group.add_argument('--interp-method',
                                choices=['linear', 'nearest', 'slinear', 'cubic', 'quintic', 'pchip'],
                                default='linear',
@@ -214,6 +244,8 @@ def parse_args() -> argparse.Namespace:
         args.file_pattern = fmt['file_pattern']
     if args.rad_transform is None:
         args.rad_transform = fmt['rad_transform']
+    if args.interpolator is None:
+        args.interpolator = fmt.get('interpolator', 'pchip')
 
     if args.rad_transform == 'asinh' and args.rad_scale is None:
         parser.error("--rad-transform=asinh requires --rad-scale")
@@ -260,6 +292,8 @@ def build_interpolator_cls_and_kwargs(args: argparse.Namespace):
         return PchipInterpolator3D, {"max_cache_size_GB": cache_size_gb}
     if args.interpolator == 'regular':
         return RegularInterpolator3D, {"method": args.interp_method}
+    if args.interpolator == 'meshblock':
+        return MeshblockPchipInterpolator, {}
     raise ValueError(f"Unknown interpolator {args.interpolator!r}")
 
 
@@ -294,6 +328,8 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
 
     if args.format == 'athenak':
         return AthenaKFileHandler(heavy_neutrinos=args.heavy_neutrinos, **common_kwargs)
+    if args.format == 'athdf_spherical':
+        return SphericalAthdfFileHandler(bh_mass=args.bh_mass, **common_kwargs)
     return FORMATS[args.format]['handler'](**common_kwargs)
 
 
