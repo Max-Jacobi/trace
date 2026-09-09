@@ -161,7 +161,7 @@ def parse_args() -> argparse.Namespace:
     mem_group.add_argument('--files-per-step', type=int, default=None,
                             help="Number of snapshot files to keep loaded at once (default: 10).")
     mem_group.add_argument('--max-tot-memory-gb', type=float, default=None,
-                            help="Alternative to --files-per-step: cap loaded-snapshot memory instead.")
+                            help="Alternative to --files-per-step. Caps the total shared memory used by loaded snapshots, counting every key.")
     perf_group.add_argument('--verbose', action='store_true',
                              help="Print per-file loading progress.")
 

@@ -164,7 +164,7 @@ an all-NaN column.
 |---|---|---|
 | `--n-cpu` | `$SLURM_NTASKS_PER_NODE` if set, else `os.cpu_count()` | Worker processes for parallel tracer integration and file loading. |
 | `--files-per-step` | `10` | Number of consecutive snapshots kept resident in shared memory at once. |
-| `--max-tot-memory-gb` | -- | Alternative to `--files-per-step`: pick the snapshot count automatically so total shared-memory use stays under this budget. Mutually exclusive with `--files-per-step`. |
+| `--max-tot-memory-gb` | -- | Alternative to `--files-per-step`. Picks the snapshot count automatically so total shared-memory use stays under this budget. The implied count is the budget divided by `per-snapshot field size x number of --keys`, so it shrinks as you add keys. Mutually exclusive with `--files-per-step`. |
 | `--verbose` | off | Print per-file loading progress bars. |
 
 `--files-per-step` (or its `--max-tot-memory-gb`-derived equivalent) must be
@@ -596,9 +596,9 @@ of the things that fail silently if you get them wrong.
 - **`ValueError: n_files_per_step (...) must be at least n_snap (...)`**:
   `--files-per-step` (or the value implied by `--max-tot-memory-gb`) is
   smaller than the integrator's snapshot stencil (2 for the trapezoid
-  schemes, 4 for `rk4`). Raise `--files-per-step`, or lower
-  `--max-tot-memory-gb`'s implied snapshot count some other way (fewer
-  `--keys`, fewer `--n-cpu`).
+  schemes, 4 for `rk4`). Raise `--files-per-step`, or raise
+  `--max-tot-memory-gb`'s implied snapshot count by giving it a bigger
+  budget or asking for fewer `--keys`.
 - **`WARNING: ... samples non-finite or |value| > X ... replaced with 0.0`**:
   a field in your snapshots carries values it cannot mean -- typically a
   quantity derived as a ratio, which blows up wherever its denominator

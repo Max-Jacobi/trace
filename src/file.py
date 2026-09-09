@@ -64,14 +64,16 @@ class FileHandler(ABC):
                 "No files with valid data were found in the given directory, "
                 "or all files were missing the requested keys."
             )
+        # One shared memory segment of memory_size is allocated per key per
+        # snapshot slot, so a slot costs memory_size * len(self.keys).
+        step_memory = self.memory_size * len(self.keys)
         if files_per_step is not None:
             self.n_files_per_step = max(1, files_per_step)
-            self.tot_memory = self.n_files_per_step * self.memory_size
         elif max_tot_memory is not None:
-            self.n_files_per_step = int(max(1, max_tot_memory // self.memory_size))
-            self.tot_memory = self.n_files_per_step * self.memory_size
+            self.n_files_per_step = int(max(1, max_tot_memory // step_memory))
         else:
             raise ValueError("Either files_per_step or max_tot_memory must be specified.")
+        self.tot_memory = self.n_files_per_step * step_memory
 
         self.allocate_memory()
 
