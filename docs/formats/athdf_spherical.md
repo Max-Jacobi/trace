@@ -90,10 +90,11 @@ python run_pipeline.py --format athdf_spherical \
     ... volume ...
 ```
 
-Note that `--start-t` must be at or slightly *above* the seed snapshot's
-exact `Time` value (float32 in the file): a rounded-down value excludes
-that snapshot from the integration range and no tracer ever activates.
-This is pipeline-wide behaviour, not athdf-specific.
+`--start-t` is snapped to the nearest available snapshot time
+automatically (a rounded value is fine; the pipeline prints the snap).
+Beware when reading times off the files yourself: `Time` is float32, and
+its printed repr (e.g. `203015.4`) can lie *below* the exact stored value
+(`203015.40625`).
 
 ## Octree block lookup
 

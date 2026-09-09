@@ -84,7 +84,6 @@ python run_pipeline.py --format athenak \
     volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
 
 # Athena++ meshblock athdf (written with ghost zones): no preparation step.
-# --start-t must sit at or slightly above the seed snapshot's exact Time.
 python run_pipeline.py --format athdf_spherical \
     --data-dir /path/to/athdf --output-dir data/tracers_out \
     --start-t 40.9446 --end-t 0 --bh-mass 1.0 \

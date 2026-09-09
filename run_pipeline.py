@@ -417,6 +417,16 @@ def main() -> None:
     interpolator_cls, interpolator_kwargs = build_interpolator_cls_and_kwargs(args)
     file_handler = build_file_handler(args, interpolator_cls, interpolator_kwargs)
 
+    # Snap --start-t to the nearest available snapshot time.  Tracers only
+    # activate when their seed time matches a snapshot time (np.isclose in
+    # src/tracers.py), and a --start-t rounded below the snapshot's exact
+    # (float32) Time would also exclude that snapshot from the integration
+    # range -- both silently yield "0 tracers active" for the whole run.
+    snapped = float(file_handler.times[np.argmin(np.abs(file_handler.times - args.start_t))])
+    if snapped != args.start_t:
+        print(f"Snapping --start-t {args.start_t} to the nearest snapshot time {snapped}.")
+        args.start_t = snapped
+
     tracers = seed_tracers(args, integrator, file_handler)
     tracers.integrate(args.start_t, args.end_t)
 
