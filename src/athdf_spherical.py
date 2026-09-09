@@ -333,9 +333,13 @@ class SphericalAthdfFileHandler(FileHandler):
         shape = tuple(extra_data['shape'])
         done: set[str] = set()
 
-        # Sorted file order makes the key -> file assignment deterministic
-        # when a variable appears in several same-time files.
-        for path in sorted(metadata_dict):
+        # When a variable appears in several same-time files, the file with
+        # the lexically LATEST path wins: a redone segment (output-0001/...)
+        # supersedes the original at duplicated snapshot times. Within one
+        # segment the order is irrelevant -- output series carry disjoint
+        # requested keys, and a raw variable duplicated across series holds
+        # identical data from the same dump.
+        for path in sorted(metadata_dict, reverse=True):
             with h5py.File(path, 'r') as f:
                 if (int(f.attrs['NumMeshBlocks']) != shape[0]
                         or not np.array_equal(f['Levels'][:], extra_data['levels'])):

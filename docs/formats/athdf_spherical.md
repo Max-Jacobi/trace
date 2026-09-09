@@ -32,7 +32,12 @@ and each file's contents are discovered from its own
 `DatasetNames`/`VariableNames` attributes -- which series carries which
 variable is never assumed. Files carrying none of the requested keys (e.g.
 a cons-only series) are skipped. A variable present in several same-time
-files is read once, from the first file in sorted order.
+files is read once, from the *last* file in sorted path order.
+
+Segmented runs (`output-0000/`, `output-0001/`, ...) are read by pointing
+`--data-dir` at the parent with `--file-pattern '**/*.athdf'`. Because the
+lexically latest path wins, a segment redone after an error supersedes the
+original wherever the two contain the same snapshot time.
 
 ## Fields
 

@@ -276,6 +276,21 @@ class TestFileHandler:
         finally:
             fh.free_shared_memory()
 
+    def test_duplicated_time_prefers_later_file(self, tmp_path):
+        # a restarted segment writing the same snapshot time must supersede
+        # the original: the lexically later path wins
+        write_athdf(tmp_path / 'a.00000.athdf', 0.0,
+                    {'prim': {'rho': lambda r, th, ph: np.full_like(r, 1.0)}})
+        write_athdf(tmp_path / 'b.00000.athdf', 0.0,
+                    {'prim': {'rho': lambda r, th, ph: np.full_like(r, 2.0)}})
+        fh = self._handler(tmp_path, ['rho'])
+        try:
+            interp = self._loaded(fh)
+            np.testing.assert_array_equal(interp.interpolator.data['rho'], 2.0)
+            interp.unload()
+        finally:
+            fh.free_shared_memory()
+
     def test_missing_key_raises(self, tmp_path):
         write_athdf(tmp_path / 's.00000.athdf', 0.0, {'prim': {'rho': smooth_field}})
         with pytest.raises(KeyError, match='T'):
