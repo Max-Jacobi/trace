@@ -28,6 +28,15 @@ Seed tracers on a spherical surface, sampling every 5th snapshot:
     python run_pipeline.py --data-dir data/transformed --output-dir data/out \\
         --start-t 11600 --end-t 0 \\
         surface --r-surf 300 --n-th 15 --n-ph 30 --every-n-files 5
+
+The 'volume-mc' and 'surface-mc' modes instead draw a fixed number of tracers
+at random, weighted by the mass density resp. the mass flux, so that every
+tracer carries the same mass M_tot/N and the tracer density follows the mass
+density.  With --adm-mass they weight with the conserved D = sqrt(gamma) W rho:
+
+    python run_pipeline.py --data-dir data/transformed --output-dir data/out \\
+        --start-t 11600 --end-t 0 --adm-mass 2.7 \\
+        surface-mc --r-surf 300 --n-tracers 5000 --every-n-files 5
 """
 
 import argparse
@@ -46,7 +55,10 @@ from src.integrators import ExplicitTrapezoid, ImplicitTrapezoid, RK4
 from src.athenak import AthenaKFileHandler
 from src.athdf_spherical import SphericalAthdfFileHandler
 from src.reduced_surface import ReducedSurfaceFileHandler
-from src.seeds import spherical_by_volume, spherical_surface_by_area
+from src.seeds import (
+    spherical_by_volume, spherical_surface_by_area,
+    spherical_by_volume_mc, spherical_surface_mc,
+)
 
 DEFAULT_VEL_KEYS = ('V_u_x', 'V_u_y', 'V_u_z')
 
@@ -145,6 +157,19 @@ def parse_args() -> argparse.Namespace:
                               help="Field keys (subset of --keys) used as the velocity vector.")
     field_group.add_argument('--density-key', default='rho',
                               help="Field key used as mass density for seed-mass integration.")
+    field_group.add_argument('--ut-key', default='u_t',
+                              help="Field key for the covariant time component u_t, used to "
+                                   "reconstruct the Lorentz factor W = -u_t/alpha for --adm-mass.")
+    field_group.add_argument('--adm-mass', type=float, default=None,
+                              help="ADM mass (code units). When given, each tracer's "
+                                   "header also carries 'mass_D', the conserved rest "
+                                   "mass rho*W*sqrt(gamma)*dV, reconstructed from the "
+                                   "tracer's own u_t and an analytic isotropic-"
+                                   "Schwarzschild metric. 'mass' is left as the "
+                                   "rho-based value either way. The 'volume-mc' and "
+                                   "'surface-mc' modes instead weight their sampling "
+                                   "with D directly, so their single 'mass' is already "
+                                   "the conserved one. Requires --ut-key in --keys.")
     field_group.add_argument('--heavy-neutrinos', choices=['sum', 'drop', 'separate'], default='sum',
                               help="--format=athenak only: how to handle AthenaK's 4th (anux) "
                                    "neutrino species, which GR-Athena++ doesn't have. 'sum' folds "
@@ -244,6 +269,59 @@ def parse_args() -> argparse.Namespace:
                           help="Use bin-centre angles/times instead of jittering within each cell/window.")
     surface.add_argument('--every-n-files', type=int, default=1,
                           help="Build one time slot every Nth snapshot between --start-t and --end-t.")
+
+    def add_angular_limits(p):
+        p.add_argument('--phi-min-deg', type=float, default=0.0, help="Minimum azimuthal angle (degrees).")
+        p.add_argument('--phi-max-deg', type=float, default=360.0, help="Maximum azimuthal angle (degrees).")
+        p.add_argument('--theta-min-deg', type=float, default=0.0, help="Minimum polar angle (degrees).")
+        p.add_argument('--theta-max-deg', type=float, default=180.0, help="Maximum polar angle (degrees).")
+
+    volume_mc = subparsers.add_parser(
+        'volume-mc',
+        help="Randomly sample a spherical volume with the mass density as weight, "
+             "giving every tracer the same mass M_tot/N.")
+    volume_mc.add_argument('--r-min', required=True, type=float, help="Minimum radius.")
+    volume_mc.add_argument('--r-max', required=True, type=float, help="Maximum radius.")
+    volume_mc.add_argument('--n-tracers', required=True, type=int, help="Number of tracers to sample.")
+    add_angular_limits(volume_mc)
+    volume_mc.add_argument('--weight-grid', choices=['auto', 'native', 'helper'],
+                            default='auto',
+                            help="Grid the sampling weights are built on. 'native' uses "
+                                 "the data's own grid with no interpolation anywhere "
+                                 "(and snaps --r-surf to a grid shell), which is both "
+                                 "more accurate and cheaper, but needs the format to "
+                                 "implement native_cell_weights. 'helper' always builds "
+                                 "the interpolated grid sized by --cells-per-tracer. "
+                                 "'auto' (default) takes native where available and "
+                                 "falls back to helper otherwise; 'native' errors "
+                                 "instead of falling back.")
+    volume_mc.add_argument('--cells-per-tracer', type=int, default=8,
+                            help="Weight-grid cells per tracer. The grid resolution is derived "
+                                 "from this and --n-tracers; raise it to resolve the density "
+                                 "field better at the cost of more interpolations.")
+
+    surface_mc = subparsers.add_parser(
+        'surface-mc',
+        help="Randomly sample the (theta, phi, t) space of a spherical surface with the "
+             "mass flux as weight, giving every tracer the same mass M_tot/N.")
+    surface_mc.add_argument('--r-surf', required=True, type=float, help="Radius of the seeding surface.")
+    surface_mc.add_argument('--n-tracers', required=True, type=int, help="Number of tracers to sample.")
+    add_angular_limits(surface_mc)
+    surface_mc.add_argument('--every-n-files', type=int, default=1,
+                             help="Sample the flux every Nth snapshot between --start-t and --end-t.")
+    surface_mc.add_argument('--weight-grid', choices=['auto', 'native', 'helper'],
+                            default='auto',
+                            help="Grid the sampling weights are built on. 'native' uses "
+                                 "the data's own grid with no interpolation anywhere "
+                                 "(and snaps --r-surf to a grid shell), which is both "
+                                 "more accurate and cheaper, but needs the format to "
+                                 "implement native_cell_weights. 'helper' always builds "
+                                 "the interpolated grid sized by --cells-per-tracer. "
+                                 "'auto' (default) takes native where available and "
+                                 "falls back to helper otherwise; 'native' errors "
+                                 "instead of falling back.")
+    surface_mc.add_argument('--cells-per-tracer', type=int, default=8,
+                             help="Weight-grid cells per tracer (spread over angles and times).")
 
     args = parser.parse_args()
 
@@ -373,6 +451,33 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
     )
     phi_min, phi_max = np.radians(args.phi_min_deg), np.radians(args.phi_max_deg)
     theta_min, theta_max = np.radians(args.theta_min_deg), np.radians(args.theta_max_deg)
+
+    mc_kwargs = dict(
+        density_key=args.density_key,
+        ut_key=args.ut_key,
+        adm_mass=args.adm_mass,
+        cells_per_tracer=args.cells_per_tracer,
+        weight_grid=args.weight_grid,
+        phi_min=phi_min, phi_max=phi_max,
+        theta_min=theta_min, theta_max=theta_max,
+        **common_kwargs,
+    ) if args.seed_mode.endswith('-mc') else {}
+
+    if args.seed_mode == 'volume-mc':
+        return spherical_by_volume_mc(
+            r_min=args.r_min, r_max=args.r_max,
+            n_tracers=args.n_tracers,
+            start_t=args.start_t,
+            **mc_kwargs,
+        )
+
+    if args.seed_mode == 'surface-mc':
+        return spherical_surface_mc(
+            r_surf=args.r_surf,
+            t_start=build_surface_t_start(args, file_handler),
+            n_tracers=args.n_tracers,
+            **mc_kwargs,
+        )
 
     if args.seed_mode == 'volume':
         return spherical_by_volume(

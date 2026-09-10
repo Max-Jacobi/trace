@@ -56,9 +56,29 @@ field is read by a single seek when its snapshot is loaded.
 ```bash
 python run_pipeline.py --format athenak \
     --data-dir /path/to/vtk --output-dir data/tracers_out \
-    --start-t 6120 --end-t 6080 \
-    volume --r-min 300 --r-max 1000 --n-r 30 --n-th 50 --n-ph 157
+    --start-t 6120 --end-t 6080 --adm-mass 2.7 \
+    volume-mc --r-min 300 --r-max 1000 --n-tracers 20000 --weight-grid native
 ```
+
+This format keeps its data on one global spherical grid and implements
+`native_cell_weights`, so `--weight-grid native` builds the sampling weights
+on the dumped samples themselves, with no interpolation and no helper grid.
+`auto` (the default) picks it here anyway; spelling it out makes a run
+self-documenting and turns a missing implementation into an error rather than
+a silent fallback.
+
+Both polar conventions described above are handled. The edges are built in
+whichever coordinate the axis is actually uniform in -- `theta` or
+`mu = cos(theta)` -- and only then converted, and a node-centred axis, whose
+first and last samples sit *on* the poles and so own half a cell, is handled
+by clipping the edges to the physical range. The check that matters is that
+the cell measures still sum to `4 pi`, which `tests/test_athenak.py` asserts
+for both conventions.
+
+Under `surface-mc`, `--r-surf` is snapped to the nearest dumped shell and the
+radius it moved to is printed, so nothing is interpolated radially either.
+The grid-based `volume` and `surface` modes work unchanged and ignore all of
+this.
 
 `--format athenak` sets these defaults:
 

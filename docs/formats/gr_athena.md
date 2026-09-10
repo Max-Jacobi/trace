@@ -63,9 +63,19 @@ dataset per field plus a `coordinates/` group holding `time`, `r`, `th`,
 ```bash
 python run_pipeline.py --format reduced_surface \
     --data-dir data/transformed --output-dir data/tracers_out \
-    --start-t 11600 --end-t 0 \
-    volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
+    --start-t 11600 --end-t 0 --adm-mass 2.7 \
+    volume-mc --r-min 300 --r-max 1000 --n-tracers 20000 --weight-grid native
 ```
+
+This format keeps its data on one global `(r, theta, phi)` grid and
+implements `native_cell_weights`, so `--weight-grid native` builds the
+sampling weights on the dumped samples themselves, with no interpolation
+and no helper grid. `auto` (the default) picks it here anyway; spelling it
+out makes a run self-documenting and turns a missing implementation into an
+error rather than a silent fallback. Under `surface-mc` it also snaps
+`--r-surf` to the nearest dumped shell and prints the radius it moved to,
+so nothing is interpolated radially either. The grid-based `volume` and
+`surface` modes work unchanged and ignore all of this.
 
 `reduced_surface` is the default format, so `--format` can be omitted. It
 sets these defaults:

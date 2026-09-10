@@ -34,6 +34,8 @@ checks) see [Analysis scripts](#analysis-scripts) and `analysis/README.md`.
   - [Integrator options](#integrator-options)
   - [Seeding: `volume` mode](#seeding-volume-mode)
   - [Seeding: `surface` mode](#seeding-surface-mode)
+  - [Seeding: `volume-mc` and `surface-mc` modes](#seeding-volume-mc-and-surface-mc-modes)
+- [Two masses: `mass` and `mass_D`](#two-masses-mass-and-mass_d)
 - [Step 3: read the output](#step-3-read-the-output)
 - [Running on a cluster (SLURM)](#running-on-a-cluster-slurm)
 - [Choosing options: a tuning guide](#choosing-options-a-tuning-guide)
@@ -71,23 +73,28 @@ your working directory, or is on `PYTHONPATH`, when invoking any script
 
 ```bash
 # GR-Athena++ surface output: reduce the raw files once, then run.
+# Both formats below keep their data on one global spherical grid, so
+# --weight-grid native weights the sampling on the data as written, with no
+# interpolation anywhere. It is what `auto` picks for them anyway.
 python transform_files.py /path/to/raw/*.surface1.*.hdf5 --output_dir data/transformed
 python run_pipeline.py --format reduced_surface \
     --data-dir data/transformed --output-dir data/tracers_out \
-    --start-t 11600 --end-t 0 \
-    volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
+    --start-t 11600 --end-t 0 --adm-mass 2.7 \
+    volume-mc --r-min 300 --r-max 1000 --n-tracers 20000 --weight-grid native
 
 # AthenaK spherical-grid vtk: no preparation step, point it at the dumps.
 python run_pipeline.py --format athenak \
     --data-dir /path/to/vtk --output-dir data/tracers_out \
-    --start-t 6120 --end-t 6080 \
-    volume --r-min 300 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
+    --start-t 6120 --end-t 6080 --adm-mass 2.7 \
+    volume-mc --r-min 300 --r-max 1000 --n-tracers 20000 --weight-grid native
 
 # Athena++ meshblock athdf (written with ghost zones): no preparation step.
+# An octree of meshblocks has no single global grid, so this one falls back to
+# the interpolated helper grid; the seeding modes are otherwise identical.
 python run_pipeline.py --format athdf_spherical \
     --data-dir /path/to/athdf --output-dir data/tracers_out \
-    --start-t 40.9446 --end-t 0 --bh-mass 1.0 \
-    volume --r-min 305 --r-max 1000 --n-r 30 --n-th 15 --n-ph 30
+    --start-t 40.9446 --end-t 0 --bh-mass 1.0 --adm-mass 2.7 \
+    volume-mc --r-min 305 --r-max 1000 --n-tracers 20000
 
 # Each tracer's full history is now one ASCII file:
 ls data/tracers_out/           # tracer_000000.dat, tracer_000001.dat, ...
@@ -116,7 +123,7 @@ For a format that isn't listed, see
 ## Step 2: run the pipeline
 
 ```
-python run_pipeline.py [shared options...] {volume,surface} [mode-specific options...]
+python run_pipeline.py [shared options...] {volume,surface,volume-mc,surface-mc} [mode-specific options...]
 ```
 
 Run `python run_pipeline.py --help`, `python run_pipeline.py volume --help`,
@@ -147,6 +154,8 @@ used as the integration bounds.
 | `--keys` | per `--format` | Every field loaded from the snapshots and recorded along each tracer's history. Must all exist in your snapshot files. |
 | `--vel-keys` | `V_u_x V_u_y V_u_z` | The (3 of `--keys`) fields used as the Cartesian velocity vector that actually moves the tracers. |
 | `--density-key` | `rho` | Field used as mass density when computing each tracer's represented mass (see the seeding sections below). |
+| `--adm-mass` | off | ADM mass in code units. Adds the conserved mass `mass_D` to each tracer, or, in the `-mc` modes, makes the sampling weight and the single `mass` conserved -- see [Two masses](#two-masses-mass-and-mass_d). |
+| `--ut-key` | `u_t` | Field key for `u_t`, from which `--adm-mass` reconstructs the Lorentz factor. Must be in `--keys` when `--adm-mass` is used. |
 
 If your data carries different or extra fields (e.g. you skipped the M1
 reduction, or ran without neutrino transport), override
@@ -270,6 +279,60 @@ chosen `--every-n-files` stride to form even one slot; it raises a clear
 error if that's not satisfiable (narrow your time range, or lower
 `--every-n-files`).
 
+### Seeding: `volume-mc` and `surface-mc` modes
+
+Same two geometries, but instead of one tracer per grid cell these draw a
+fixed number of tracers at random, weighted by the mass. `volume-mc`
+samples the shell with the density as weight, `surface-mc` samples the
+`(theta, phi, t)` surface-time space with the mass flux magnitude
+`|D v_r|` as weight. Every tracer then carries the *same* mass
+`M_tot / --n-tracers`, and the tracer number density follows the mass
+density. That under-resolves low-density regions on purpose: it is the
+optimal way to spend a fixed tracer budget on tracking the global mass
+flow.
+
+In `surface-mc` an inflowing surface element (`v_r < 0`) is sampled with
+the same probability as an outflowing one of equal magnitude, but its
+tracers carry a **negative** mass, so they subtract from the net ejecta
+just as their surface elements do. `M_tot` is the mass crossing the
+sphere either way, and summing the signed tracer masses is an unbiased
+estimate of the net crossing mass (this is standard importance sampling:
+drawing at `p ∝ |w|` and weighting by `w/p` leaves `sign(w) M_tot/N`).
+
+With `--adm-mass` the weight and the total use the conserved density
+`D = sqrt(gamma) W rho` rather than `rho`, so the `mass` written per tracer
+is already the conserved rest mass. These modes record `mass_D` alongside
+it with the same value, which is how the pipeline knows not to apply
+`W sqrt(gamma)` a second time downstream -- see
+[Two masses](#two-masses-mass-and-mass_d).
+
+```bash
+# --weight-grid native is what `auto` already picks for GR-Athena++ and
+# AthenaK data; it is spelled out here to make the runs self-documenting.
+python run_pipeline.py --data-dir ... --output-dir ... --start-t ... --end-t ... \
+    --adm-mass 2.7 volume-mc --r-min 300 --r-max 1000 --n-tracers 5000 \
+    --weight-grid native
+
+python run_pipeline.py --data-dir ... --output-dir ... --start-t ... --end-t ... \
+    --adm-mass 2.7 surface-mc --r-surf 300 --n-tracers 5000 --every-n-files 5 \
+    --weight-grid native
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--r-min`, `--r-max` (`volume-mc`, required) | -- | Radial range of the sampled shell. |
+| `--r-surf` (`surface-mc`, required) | -- | Radius of the sampled surface. |
+| `--n-tracers` (required) | -- | Number of tracers to draw. |
+| `--phi-min-deg`, `--phi-max-deg`, `--theta-min-deg`, `--theta-max-deg` | `0`/`360`, `0`/`180` | Same meaning as in `volume` mode. |
+| `--every-n-files` (`surface-mc`) | `1` | Sample the flux every Nth snapshot between `--start-t` and `--end-t`. Raising it cuts the cost of the flux integral at the price of a coarser time axis. |
+| `--weight-grid` | `auto` | Grid the sampling weights are built on: `native` uses the data's own grid with no interpolation at all, `helper` builds an interpolated one sized by `--cells-per-tracer`, `auto` takes native where the format provides it. See [`--weight-grid`](#where-the-sampling-weights-come-from---weight-grid). |
+| `--cells-per-tracer` | `8` | Resolution of the *helper* weight grid (`--n-tracers` times this many cells, split over the axes so cells are roughly isotropic). Raise it to resolve a structured density/flux field better, at the price of more interpolations. Ignored under `--weight-grid native`, where the grid is whatever the data is. |
+
+The weight grid is only the sampling PDF and the mass normalisation: the
+tracer positions themselves are drawn continuously (uniformly in volume,
+resp. in solid angle) inside the drawn cell. Injection times are exact
+snapshot times, since a tracer only activates on one.
+
 ## Step 3: read the output
 
 Every tracer becomes one file, `<output-dir>/tracer_NNNNNN.dat`
@@ -289,7 +352,9 @@ Every tracer becomes one file, `<output-dir>/tracer_NNNNNN.dat`
   boundary and stopped early, `"failed"` if something went wrong writing
   its data, `"not started"` if it was never reached). `volume`-seeded
   tracers also carry `dV` (cell volume) and `mass`; `surface`-seeded
-  tracers carry `mass` (flux-integrated).
+  tracers carry `mass` (flux-integrated). With `--adm-mass`, every tracer
+  additionally carries `mass_D` -- see [Two masses](#two-masses-mass-and-mass_d);
+  the `-mc` modes are the exception, their `mass` is already the conserved one.
 - **Line 2** (`#`-prefixed): column legend -- always `time x y z` followed
   by every field in `--keys`, in order.
 - **Remaining lines**: one row per integration step, sorted by time,
@@ -310,6 +375,86 @@ tr.data["time"]      # ndarray, matching time values
 `analysis/` (see [Analysis scripts](#analysis-scripts) below) has worked,
 argparse-driven examples of loading many `Trajectory` objects this way and
 building plots/animations/mass budgets from them.
+
+### Two masses: `mass` and `mass_D`
+
+`mass` is built from `--density-key`, which for every format shipped here is
+`rho`, the rest-mass density. The conserved rest mass is not that integral
+but the integral of the densitized `D = rho*W*sqrt(gamma)`, so `mass` is
+short by `W*sqrt(gamma)`, of order a few percent for merger ejecta and rising
+with both velocity and depth in the potential. It is not a constant factor
+and cannot be divided out afterwards.
+
+Passing `--adm-mass M` (code units) writes a second header entry `mass_D`
+alongside it, leaving `mass` untouched. Both factors are reconstructed from
+data the tracer already carries:
+
+```
+W            = -u_t / alpha          (exact where the shift is negligible)
+sqrt(gamma)  = psi**6                (isotropic Schwarzschild, psi = 1 + M/2r)
+alpha        = (1 - M/2r) / psi
+-> D/rho     = (-u_t) * psi**7 / (1 - M/2r)
+```
+
+evaluated at each tracer's own seed radius, which is where its cell volume was
+measured and so where its conserved parcel mass is defined. `u_t` (or whatever
+`--ut-key` names) must be in `--keys` (it is by default for `reduced_surface`).
+
+The `volume-mc` and `surface-mc` modes apply the same factor, but inside the
+seeding, at every point of the weight grid rather than once per tracer at its
+seed radius. Their sampling weight and total mass are then already the
+conserved ones, so they write a single `mass` and no `mass_D`.
+
+Checked against a GR-Athena++ BNS merger at `r = 400 M`, where the surface
+dumps carry both `hydro.cons.D` and `hydro.aux.W`: the reconstructed
+`sqrt(gamma)` was accurate to 0.008%, the reconstructed `W` matched the dumped
+one to five decimals, and a 0.1 `M_sun` error in `--adm-mass` moves the result
+by under 0.1%. Summing `mass_D` over the tracers crossing that sphere
+reproduced the simulation's own `D*V` flux integral to better than 1%, against
+3.8% low for `mass`.
+
+The approximation degrades close to the remnant, where the shift stops being
+negligible and the metric stops being Schwarzschild. If your snapshots carry
+`D` itself, prefer pointing `--density-key` at it and ignoring all of this.
+
+### Where the sampling weights come from: `--weight-grid`
+
+The `-mc` modes need the density (or the mass flux) over the seeding region to
+build their sampling weights. Two ways to get it:
+
+- `helper` lays a grid of its own, sized from `--cells-per-tracer`, and
+  interpolates the fields onto it.
+- `native` uses the data's own grid directly, with no interpolation anywhere.
+  For a surface it also snaps `--r-surf` to the nearest grid shell, so no
+  radial interpolation happens either, and prints the radius it moved to.
+- `auto` (the default) takes `native` where the format provides it and falls
+  back to `helper` otherwise. `native` errors rather than falling back, so a
+  run cannot silently change what it sampled.
+
+`native` is both more accurate and **faster**, which is the opposite of what
+the cell counts suggest. The helper route's cost is dominated by building an
+interpolator per sampled snapshot, not by evaluating it, and the native route
+has none to build. Measured on a GR-Athena++ BNS merger:
+
+| mode | grid | cells | wall |
+|---|---|---|---|
+| `volume-mc` | helper | 13x25x50 | 61 s |
+| `volume-mc` | native | 213x128x256 | **54 s** |
+| `surface-mc` | helper | 34x68x7 | 169 s |
+| `surface-mc` | native | 128x256x7 | **88 s** |
+
+with the sampled totals agreeing to 0.4% either way. `--cells-per-tracer` is
+ignored under `native`, since the grid is whatever the data is.
+
+Note that refining the weight grid reduces bias in the weights, not the
+sampling variance -- that is set by `--n-tracers` and stays `sqrt(N)` however
+fine the grid. What `native` buys is a more accurate total and faithful sharp
+features, not a smoother `mdot`.
+
+To give a new format a native grid, implement `native_cell_weights` on its
+`FileHandler` (see [docs/writing_a_reader.md](docs/writing_a_reader.md)). It
+is optional: formats without a single global grid, such as an octree of
+meshblocks, simply leave it alone.
 
 ## Running on a cluster (SLURM)
 
