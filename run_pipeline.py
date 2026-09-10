@@ -152,6 +152,13 @@ def parse_args() -> argparse.Namespace:
                               help="--format=athdf_spherical only: black hole mass in code units, used "
                                    "in the Schwarzschild lapse/metric factors of the velocity "
                                    "transform (not stored in the athdf metadata).")
+    field_group.add_argument('--positive-keys', nargs='+', default=[],
+                              help="Field keys (subset of --keys) that cannot physically be "
+                                   "negative. Samples below zero are floored at 0 as each "
+                                   "snapshot is loaded, before any interpolation or seed-mass "
+                                   "integration. Use this when the writer's own output "
+                                   "interpolation is non-monotone and undershoots at shock "
+                                   "fronts. Off by default, since it modifies the loaded data.")
 
     perf_group = parser.add_argument_group("performance")
     perf_group.add_argument('--n-cpu', type=int,
@@ -252,6 +259,9 @@ def parse_args() -> argparse.Namespace:
     missing = [k for k in list(args.vel_keys) + [args.density_key] if k not in args.keys]
     if missing:
         parser.error(f"--vel-keys/--density-key entries not present in --keys: {missing}")
+    missing = [k for k in args.positive_keys if k not in args.keys]
+    if missing:
+        parser.error(f"--positive-keys entries not present in --keys: {missing}")
     return args
 
 
@@ -324,6 +334,7 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
         rad_transform=rad_transform,
         file_pattern=args.file_pattern,
         interpolator_kwargs=interpolator_kwargs,
+        positive_keys=list(args.positive_keys),
     )
 
     if args.format == 'athenak':

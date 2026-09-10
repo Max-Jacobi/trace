@@ -10,6 +10,7 @@ import gc
 
 import numpy as np
 import pytest
+from multiprocessing.shared_memory import SharedMemory
 
 from src.file import FileHandler
 from src.gra_surface import GRASurfaceFileHandler
@@ -135,3 +136,75 @@ class TestSharedMemoryBudget:
         assert allocated <= budget
         # ...and it is the largest count that does fit.
         assert allocated + handler.memory_size * keys > budget
+
+
+class TestPositiveKeyClamping:
+    """
+    ``--positive-keys`` floors declared-non-negative fields at 0 as each
+    snapshot is loaded.  The writer this exists for (GR-Athena++'s
+    non-monotone Lagrange interpolation onto its output surfaces)
+    undershoots at shock fronts and emits small negative temperatures and
+    densities, which the bound-preserving interpolators here would
+    otherwise reproduce faithfully.
+    """
+
+    @staticmethod
+    def _fill(handler, slot, key, values):
+        """Write `values` into the shared-memory segment for (slot, key)."""
+        shm = SharedMemory(name=handler.shared_memory[slot][key])
+        try:
+            buf = np.ndarray(handler.memory_size // 8, dtype=np.float64, buffer=shm.buf)
+            buf[:] = 0.0
+            buf[: len(values)] = values
+        finally:
+            shm.close()
+
+    @staticmethod
+    def _read(handler, slot, key, n):
+        shm = SharedMemory(name=handler.shared_memory[slot][key])
+        try:
+            buf = np.ndarray(handler.memory_size // 8, dtype=np.float64, buffer=shm.buf)
+            return buf[:n].copy()
+        finally:
+            shm.close()
+
+    def test_negative_samples_are_floored(self, stub_handler):
+        handler = stub_handler(files_per_step=2, positive_keys=["key0"])
+        vals = np.array([-1.5, -1e-30, 0.0, 2.0])
+        self._fill(handler, 0, "key0", vals)
+
+        handler._clamp_positive(1)
+
+        assert np.array_equal(
+            self._read(handler, 0, "key0", len(vals)),
+            np.array([0.0, 0.0, 0.0, 2.0]),
+        )
+
+    def test_undeclared_keys_keep_their_sign(self, stub_handler):
+        """A velocity component is legitimately negative and must survive."""
+        handler = stub_handler(files_per_step=2, positive_keys=["key0"])
+        vals = np.array([-1.5, 2.0])
+        self._fill(handler, 1, "key1", vals)
+
+        handler._clamp_positive(2)
+
+        assert np.array_equal(self._read(handler, 1, "key1", len(vals)), vals)
+
+    def test_keys_absent_from_the_format_are_ignored(self, stub_handler):
+        """
+        One standard positive-key list should be usable whatever the format
+        supplies, so an entry that is not among ``keys`` is dropped rather
+        than raising when the clamp goes looking for its segment.
+        """
+        handler = stub_handler(files_per_step=2, positive_keys=["key0", "not_a_field"])
+        assert handler.positive_keys == ["key0"]
+        handler._clamp_positive(1)
+
+    def test_no_positive_keys_is_a_no_op(self, stub_handler):
+        handler = stub_handler(files_per_step=2)
+        vals = np.array([-1.5, 2.0])
+        self._fill(handler, 0, "key0", vals)
+
+        handler._clamp_positive(1)
+
+        assert np.array_equal(self._read(handler, 0, "key0", len(vals)), vals)

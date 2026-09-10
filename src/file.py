@@ -42,8 +42,14 @@ class FileHandler(ABC):
         verbose: bool = False,
         out_file: TextIO = sys.stdout,
         interpolator_kwargs: dict[str, Any] = {},
+        positive_keys: list[str] | None = None,
         ) -> None:
         self.keys = keys
+        # Fields that cannot physically be negative, floored at 0 after every
+        # load. Entries not among `keys` are ignored rather than rejected, so
+        # a caller can pass one standard list whatever the format supplies.
+        self.positive_keys = [key for key in (positive_keys or []) if key in keys]
+        self._clamp_warned: set[str] = set()
 
         self.interpolator_cls = interpolator
 
@@ -298,7 +304,49 @@ class FileHandler(ABC):
             unit="file",
             **self.parallel_kwargs
         )
+        self._clamp_positive(len(indices))
         self.cur_times = self.times[indices]
+
+    def _clamp_positive(self, n_slots: int) -> None:
+        """
+        Floor every `positive_keys` field at 0 in the freshly loaded slots.
+
+        Some writers emit small negative values for quantities that cannot be
+        negative -- a non-monotone interpolation onto an output surface
+        overshoots at a shock front, and undershoots to just below zero on the
+        cold side of it.  The interpolators here are bound-preserving, so they
+        do not create such values, but they do faithfully reproduce them and
+        let one poisoned sample drag down a whole stencil's worth of queries.
+        Clamping the samples rather than the interpolated result therefore
+        fixes both, and fixes the seed masses too, which integrate the density
+        field directly rather than through an interpolator.
+        """
+        if not self.positive_keys:
+            return
+
+        n_elem = self.memory_size // 8
+        for slot in range(n_slots):
+            for key in self.positive_keys:
+                shm = SharedMemory(name=self.shared_memory[slot][key])
+                try:
+                    buf = np.ndarray(n_elem, dtype=np.float64, buffer=shm.buf)
+                    n_bad = int(np.count_nonzero(buf < 0))
+                    if not n_bad:
+                        continue
+                    worst = float(buf.min())
+                    np.maximum(buf, 0.0, out=buf)
+                    if key not in self._clamp_warned:
+                        self._clamp_warned.add(key)
+                        print(
+                            f"WARNING: field '{key}' is declared non-negative but "
+                            f"{n_bad} of {n_elem} samples in a loaded snapshot were "
+                            f"negative (most negative {worst:.3e}); floored at 0. "
+                            f"Further occurrences of '{key}' are clamped silently.",
+                            file=self.parallel_kwargs["file"],
+                            flush=True,
+                        )
+                finally:
+                    shm.close()
 
 
 
