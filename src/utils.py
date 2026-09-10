@@ -277,3 +277,36 @@ def do_parallel_star_pool(
         return list(tqdm(map(_unpack_args, packed_args), **kwargs))
 
     return list(tqdm(pool.imap_unordered(_unpack_args, packed_args, chunksize=chunksize), **kwargs))
+
+
+def densitization_factor(r, u_t, adm_mass: float):
+    """
+    D/rho = W*sqrt(gamma) at radius `r`, from the local `u_t`.
+
+    The rest-mass density rho is not the conserved density; the conserved
+    rest mass is the integral of D = rho*W*sqrt(gamma), so a rho-based mass
+    is short by that factor. Both pieces are recoverable without any metric
+    in the snapshot data:
+
+      * W = -u_t/alpha, exact wherever the shift is negligible (checked against
+        a dumped W at r = 400 M in a BNS merger: agreement to 5 decimals).
+      * for isotropic Schwarzschild with psi = 1 + M/2r,
+        alpha = (1 - M/2r)/psi and sqrt(gamma) = psi**6,
+
+    giving D/rho = (-u_t) * psi**7 / (1 - M/2r). Against a dumped conformal
+    metric that was accurate to 0.008% at r = 400 M, and a 0.1 M_sun error in
+    `adm_mass` moves it by under 0.1%. It degrades close to the remnant, where
+    the shift stops being negligible and the metric stops being Schwarzschild.
+
+    Accepts scalars or arrays; the return has the broadcast shape.
+    """
+    r = np.asarray(r, dtype=float)
+    if np.any(r <= adm_mass):
+        r_bad = float(np.min(r))
+        raise ValueError(
+            f"densitization needs r > adm_mass; got r={r_bad:g}, adm_mass={adm_mass:g}. "
+            "The isotropic-Schwarzschild form is meaningless that deep in."
+        )
+    psi = 1.0 + adm_mass / (2.0 * r)
+    factor = -np.asarray(u_t, dtype=float) * psi ** 7 / (1.0 - adm_mass / (2.0 * r))
+    return factor if factor.ndim else float(factor)

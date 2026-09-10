@@ -36,6 +36,9 @@ import sys
 
 import numpy as np
 
+# Re-exported: the tracer masses are rho-based unless a seeder densitizes them.
+from src.utils import densitization_factor
+
 from src.interpolators import (
     PchipInterpolator3D, RegularInterpolator3D, MeshblockPchipInterpolator,
 )
@@ -256,6 +259,9 @@ def parse_args() -> argparse.Namespace:
 
     if args.rad_transform == 'asinh' and args.rad_scale is None:
         parser.error("--rad-transform=asinh requires --rad-scale")
+    if args.adm_mass is not None and args.ut_key not in args.keys:
+        parser.error(f"--adm-mass needs {args.ut_key!r} (--ut-key) in --keys "
+                     "to reconstruct W = -u_t/alpha")
     missing = [k for k in list(args.vel_keys) + [args.density_key] if k not in args.keys]
     if missing:
         parser.error(f"--vel-keys/--density-key entries not present in --keys: {missing}")
@@ -395,14 +401,30 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
     )
 
 
-def write_output(tracers, output_dir: str, density_key: str = 'rho') -> None:
+def write_output(
+    tracers,
+    output_dir: str,
+    density_key: str = 'rho',
+    adm_mass: float | None = None,
+    ut_key: str = 'u_t',
+    ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     filebase = f"{output_dir}/tracer_"
 
     for tr in tracers.tracers:
+        i_tmax = np.argmax(tr.times)
         if 'dV' in tr.props:
-            i_tmax = np.argmax(tr.times)
             tr.props['mass'] = tr.props['dV'] * tr.data[density_key][i_tmax]
+
+        # 'mass_D' already present means the seeding sampled D directly (the
+        # '-mc' modes), so its mass IS the conserved one. Recomputing here
+        # would apply W*sqrt(gamma) a second time.
+        if adm_mass is not None and 'mass' in tr.props and 'mass_D' not in tr.props:
+            # Same sample the mass itself is taken at, so the two agree.
+            r_seed = float(np.linalg.norm(tr.positions[i_tmax]))
+            factor = densitization_factor(
+                r_seed, float(tr.data[ut_key][i_tmax]), adm_mass)
+            tr.props['mass_D'] = tr.props['mass'] * factor
 
         # Strip any dotted group prefix ("group.field" -> "field") from data keys.
         short_keys = {key: key.split(".")[-1] for key in tr.data.keys()}
@@ -441,7 +463,11 @@ def main() -> None:
     tracers = seed_tracers(args, integrator, file_handler)
     tracers.integrate(args.start_t, args.end_t)
 
-    write_output(tracers, args.output_dir, args.density_key)
+    write_output(tracers, args.output_dir, density_key=args.density_key,
+                 # The -mc seeders already sample and normalise on D, so their
+                 # 'mass' is the conserved one -- don't densitize it again.
+                 adm_mass=None if args.seed_mode.endswith('-mc') else args.adm_mass,
+                 ut_key=args.ut_key)
 
 
 if __name__ == "__main__":
