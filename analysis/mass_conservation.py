@@ -46,6 +46,7 @@ import argparse
 import os
 
 import numpy as np
+from scipy.integrate import cumulative_trapezoid
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -79,6 +80,19 @@ def parse_args() -> argparse.Namespace:
                          help="Optional sanity filter: drop tracers whose innermost (earliest-time) radius "
                               "never gets below this value (code units) -- e.g. to exclude tracers that "
                               "didn't integrate back far enough to reach a reference epoch. Disabled by default.")
+    parser.add_argument('--densitize-mass', type=float, default=None,
+                        help="ADM mass (code units) used to convert the rho-based "
+                             "tracer masses to the conserved baryon mass "
+                             "D = rho*W*sqrt(gamma), via W = -u_t/alpha and an "
+                             "analytic isotropic-Schwarzschild metric. Omit to "
+                             "leave the masses as the seeding produced them.")
+    parser.add_argument('--mdot-dt', type=float, default=None,
+                        help="Bin the tracer-derived mdot onto this time step "
+                             "(code units) instead of the snapshot cadence. The "
+                             "tracer rate is a sum over discrete crossings and "
+                             "carries shot noise the Eulerian ground truth does "
+                             "not; widening the differencing interval averages it "
+                             "down. Leaves the cumulative mass curves untouched.")
     parser.add_argument('--t-min', type=float, default=None, help="Plot x-axis lower bound (default: full range).")
     parser.add_argument('--t-max', type=float, default=None, help="Plot x-axis upper bound (default: full range).")
     parser.add_argument('--output', default='mass_conservation.png', help="Output image path.")
@@ -163,6 +177,38 @@ def crossing_mass_vs_time(trajs, masses: np.ndarray, times: np.ndarray, r_check:
     return np.array([np.sum(masses[r >= r_check]) for r in tr_r])
 
 
+
+def densitize(trajs, masses, m_adm: float) -> np.ndarray:
+    """
+    Convert rho-based tracer masses to the conserved baryon mass.
+
+    The seeding integrates `--density-key` (rho, the rest-mass density) over a
+    coordinate cell, while the conserved rest mass is the integral of the
+    densitized D = rho*W*sqrt(gamma). The missing factor is recoverable from
+    the tracer's own u_t plus an analytic metric: W = -u_t/alpha holds to
+    machine precision wherever the shift is negligible, and for isotropic
+    Schwarzschild alpha = (1 - M/2r)/psi and sqrt(gamma) = psi^6 with
+    psi = 1 + M/2r, so
+
+        D/rho = W*sqrt(gamma) = (-u_t) * psi**7 / (1 - M/2r).
+
+    Evaluated at the seed point, where the tracer's cell volume was measured
+    and so where its conserved parcel mass is defined.
+    """
+    out = np.asarray(masses, dtype=float).copy()
+    for i, tr in enumerate(trajs):
+        if 'mass_D' in tr.props:
+            # Seeding already sampled D (the '-mc' modes); tracer_masses has
+            # returned that value, so applying the factor again would double it.
+            continue
+        d = tr.data
+        k = int(np.argmax(d["time"]))
+        r = float(np.sqrt(d["x"][k] ** 2 + d["y"][k] ** 2 + d["z"][k] ** 2))
+        psi = 1.0 + m_adm / (2.0 * r)
+        out[i] *= float(-d["u_t"][k]) * psi ** 7 / (1.0 - m_adm / (2.0 * r))
+    return out
+
+
 def main() -> None:
     args = parse_args()
     units = get_units()
@@ -183,22 +229,51 @@ def main() -> None:
     vol_masses = tracer_masses(vol_trajs)
     srf_masses = tracer_masses(srf_trajs)
 
+    if args.densitize_mass is not None:
+        vol_masses = densitize(vol_trajs, vol_masses, args.densitize_mass)
+        srf_masses = densitize(srf_trajs, srf_masses, args.densitize_mass)
+        print(f"masses densitized to D = rho*W*sqrt(gamma) using M_ADM="
+              f"{args.densitize_mass:g}; total {vol_masses.sum() + srf_masses.sum():.4e} Msun")
+
     times = np.unique(np.concatenate([tr.data["time"] for tr in (*vol_trajs, *srf_trajs)]))
 
     mtot_vol = crossing_mass_vs_time(vol_trajs, vol_masses, times, args.r_check)
     mtot_srf = crossing_mass_vs_time(srf_trajs, srf_masses, times, args.r_check)
     mtot_combined = mtot_vol + mtot_srf
 
-    mdot_combined = np.zeros_like(mtot_combined)
-    mdot_srf = np.zeros_like(mtot_srf)
-    mdot_combined[1:] = np.diff(mtot_combined) / np.diff(times)
-    mdot_srf[1:] = np.diff(mtot_srf) / np.diff(times)
+    def rate(mtot):
+        """
+        d(mtot)/dt, optionally on a coarser grid than the snapshot cadence.
+
+        The tracer-derived rate is a sum over discrete parcels crossing the
+        sphere, so it carries shot noise that the Eulerian ground truth does
+        not. Differencing the cumulative curve over a wider interval averages
+        that down (as sqrt of the widening) without touching the cumulative
+        curve itself, which is what the mass comparison actually uses.
+        """
+        if args.mdot_dt is None:
+            t = times
+            m = mtot
+        else:
+            n = max(2, int(np.ceil((times[-1] - times[0]) / args.mdot_dt)) + 1)
+            t = np.linspace(times[0], times[-1], n)
+            m = np.interp(t, times, mtot)
+        d = np.zeros_like(m)
+        d[1:] = np.diff(m) / np.diff(t)
+        return t, d
+
+    t_rate, mdot_combined = rate(mtot_combined)
+    _, mdot_srf = rate(mtot_srf)
+    if args.mdot_dt is not None:
+        print(f"mdot binned onto dt={args.mdot_dt:g} ({len(t_rate)} points, "
+              f"native cadence had {len(times)})")
 
     t_ms = times * units.time_ms
+    t_rate_ms = t_rate * units.time_ms
 
     fig, ax = plt.subplots(1, 2, figsize=(12, 5))
-    ax[0].plot(t_ms, mdot_combined / units.time_ms, label='combined (tracer-derived)')
-    ax[0].plot(t_ms, mdot_srf / units.time_ms, label='surface contribution only')
+    ax[0].plot(t_rate_ms, mdot_combined / units.time_ms, label='combined (tracer-derived)')
+    ax[0].plot(t_rate_ms, mdot_srf / units.time_ms, label='surface contribution only')
     ax[1].plot(t_ms, mtot_combined, label='combined (tracer-derived)')
     ax[1].plot(t_ms, mtot_srf, label='surface contribution only')
 
@@ -222,17 +297,54 @@ def main() -> None:
             print(f"WARNING: raw diagnostic surface radius ({s.r:.3f}) does not match "
                   f"--r-check ({args.r_check:.3f}); the overlay below is not measuring the same boundary.")
 
-        mdot_sf = sf.integrate_flux_classical(
-            flux=("tracer.hydro.aux.V_u_x", "tracer.hydro.aux.V_u_y", "tracer.hydro.aux.V_u_z"),
-            weight="tracer.hydro.prim.rho",
-        )
+        # Surface dumps that carry the derived `tracer.*` group hand us rho and
+        # V^i ready-made. The plain GR-Athena++ surface output (the one written
+        # without that group) carries the evolved variables instead, and there
+        # the same flux is D*V^i, which is what sf.mass_flux builds -- and for a
+        # densitized flux like D the flat normal of integrate_flux_classical is
+        # exact rather than approximate.
+        tracer_flux = ("tracer.hydro.aux.V_u_x", "tracer.hydro.aux.V_u_y",
+                       "tracer.hydro.aux.V_u_z")
+        tracer_weight = "tracer.hydro.prim.rho"
+        if all(k in s.fields for k in (*tracer_flux, tracer_weight)):
+            mdot_sf = sf.integrate_flux_classical(flux=tracer_flux, weight=tracer_weight)
+        else:
+            missing = [k for k in sf.mass_flux.keys if k not in s.fields]
+            if missing:
+                raise KeyError(
+                    f"surface{args.isurf} dumps carry neither the 'tracer.*' group nor "
+                    f"the variables sf.mass_flux needs (missing {missing}). Point "
+                    f"--isurf at a surface that dumps one of the two."
+                )
+            mdot_sf = sf.integrate_flux_classical(flux=sf.mass_flux)
+        print(f"raw ground truth from {mdot_sf.name}")
         raw_data = s.process_h5_parallel((mdot_sf,), ordered=True)
         raw_mdot = np.array([d[0] for d in raw_data])
-        raw_mtot = np.cumsum(raw_mdot * s.dts)
+        # s.dts is already a centred trapezoid weight -- dts[i] = (dt[i]+dt[i-1])/2,
+        # halved at the ends -- so sum(mdot*dts) is the correct total. But
+        # cumsum of it overshoots every intermediate point by mdot[i]*dt[i]/2,
+        # half a step, because it credits the whole of dump i's weight to a
+        # curve plotted at t[i]. That makes the raw cumulative lead the
+        # tracer-derived one during the steep rise. Integrating properly puts
+        # the mass where it belongs and leaves the total unchanged.
+        raw_mtot = cumulative_trapezoid(raw_mdot, s.times, initial=0.0)
 
         raw_t_ms = s.times * units.time_ms
         ax[0].plot(raw_t_ms, raw_mdot / units.time_ms, label='raw simulation (ground truth)', c='k')
         ax[1].plot(raw_t_ms, raw_mtot, label='raw simulation (ground truth)', c='k')
+
+        # The point of the script, stated as a number rather than left to the
+        # eye. Compare at the last time both curves cover, since the tracer and
+        # raw diagnostics are written on different cadences and end points.
+        t_end = min(times[-1], s.times[-1])
+        m_tracer = float(np.interp(t_end, times, mtot_combined))
+        m_raw = float(np.interp(t_end, s.times, raw_mtot))
+        print(f"cumulative mass through R={args.r_check:g} at t={t_end:g} "
+              f"({t_end * units.time_ms:.2f} ms):")
+        print(f"  tracer-derived   {m_tracer:.4e} Msun")
+        print(f"  raw ground truth {m_raw:.4e} Msun")
+        print(f"  tracer/raw = {m_tracer / m_raw:.4f}  "
+              f"({100 * (m_tracer / m_raw - 1):+.2f}%)")
 
     for a in ax:
         a.set_xlabel("time (ms)")

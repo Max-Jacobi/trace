@@ -142,8 +142,19 @@ def add_spherical_fields(traj: Trajectory) -> None:
 
 
 def tracer_masses(trajs: list[Trajectory]) -> np.ndarray:
-    """Each tracer's represented mass (absolute value -- sign is not meaningful here)."""
-    return np.abs(np.array([t.props['mass'] for t in trajs]))
+    """
+    Each tracer's represented mass, **sign included**.
+
+    A surface-seeded tracer's mass is the flux integral over its cell, which is
+    negative wherever material crosses the sphere inward. That sign is
+    meaningful: it subtracts from the net crossing mass exactly as the surface
+    element it stands for does. The mass-weighted `-mc` seeding makes this
+    routine, since it samples inflowing cells in proportion to their flux like
+    any other. Taking the magnitude here would silently count inflow as ejecta.
+
+    Prefers `mass_D` (the conserved rest mass) when the seeding recorded one.
+    """
+    return np.array([t.props.get('mass_D', t.props['mass']) for t in trajs])
 
 
 def value_at_reference_temperature(traj: Trajectory, key: str, t_ref_gk: float, Tfac: float) -> float:
