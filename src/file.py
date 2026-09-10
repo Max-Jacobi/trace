@@ -123,6 +123,65 @@ class FileHandler(ABC):
         """
         pass
 
+    def native_cell_weights(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        surface_radius: float | None = None,
+        ) -> tuple[tuple[np.ndarray, ...], np.ndarray, float | None]:
+        """
+        The format's **own** grid, as cell edges plus the field values on it.
+
+        Optional. Formats that store their data on a single global spherical
+        grid can implement this so mass-weighted seeding samples the data as
+        written, instead of interpolating it onto a helper grid first. That
+        removes the interpolation error and the midpoint rule, and is *cheaper*
+        -- the helper route's cost is dominated by building an interpolator per
+        sampled snapshot, not by evaluating it. Formats without one global grid
+        (an octree of meshblocks, say) should leave this alone; callers fall
+        back to the helper grid.
+
+        Edges rather than centres, so a caller can size cells, place tracers
+        inside them and integrate over them with exactly the code it uses for
+        the helper grid.
+
+        Parameters
+        ----------
+        slot : int
+            Shared-memory slot holding the snapshot to read, i.e. an index into
+            ``self.shared_memory`` alongside ``cur_times``.
+        keys : tuple of str
+            Fields to return values for; must be among ``self.keys``.
+        surface_radius : float or None
+            When None, return the full 3-D grid. Otherwise return only the
+            shell nearest this radius. The radius is snapped to the grid, which
+            is the point: no radial interpolation happens either.
+
+        Returns
+        -------
+        edges : tuple of ndarray
+            ``(r_edges, cos_theta_edges, phi_edges)``, or
+            ``(cos_theta_edges, phi_edges)`` when ``surface_radius`` is given.
+            ``cos_theta_edges`` is monotone but may ascend or descend --
+            AthenaK's equal-solid-angle grids run the other way from
+            GR-Athena++'s -- so callers must not assume a direction. Taking
+            ``abs`` of the differences for a measure and carrying their sign
+            when placing points inside a cell handles both.
+        values : ndarray, shape (len(keys), n_cells)
+            Field values, C-ordered over the cells those edges define.
+        r_used : float or None
+            The grid radius actually used, when ``surface_radius`` was given.
+
+        Raises
+        ------
+        NotImplementedError
+            If this format has no single global grid to weight on.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no single global grid to weight on; "
+            "use --weight-grid helper."
+        )
+
     @staticmethod
     @abstractmethod
     def load_step_to_memory(

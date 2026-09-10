@@ -224,3 +224,40 @@ Once your handler runs, check these before trusting a production run:
    pattern.
 6. **Shared memory is released.** `ls /dev/shm` after a run; see the
    troubleshooting section of the [main README](../README.md).
+
+## Optional: `native_cell_weights`
+
+Nothing above requires it, and a reader that omits it is complete. Implement
+it only if your format keeps its data on a *single global spherical grid*.
+
+The mass-weighted `-mc` seeding modes need the density, or the mass flux, over
+the seeding region in order to build their sampling weights. By default they
+lay a helper grid over that region and interpolate onto it. If your format
+already has a grid, that is a waste twice over: it costs an interpolator build
+per sampled snapshot, and it puts an interpolation error and a midpoint rule
+between the data and the weights.
+
+`native_cell_weights(slot, keys, surface_radius=None)` hands the seeder the
+grid instead. Return **cell edges** rather than centres -- `(r_edges,
+cos_theta_edges, phi_edges)`, or `(cos_theta_edges, phi_edges)` for a single
+shell -- plus the field values C-ordered over the cells those edges define,
+and the grid radius actually used. Edges let the caller size cells, place
+tracers inside them and integrate over them with exactly the code it uses for
+the helper grid, so nothing downstream needs to know which route was taken.
+
+Three things to get right:
+
+- **Strip ghost zones** before returning anything. The values must line up
+  with the edges, one per cell.
+- **Give real edges, not sample points.** For a geometrically spaced radial
+  axis a sample sits at the geometric centre of its cell, so the edges are at
+  `r * q**(-+1/2)`; for a uniform cell-centred angular axis they are half a
+  spacing either side. Getting this wrong biases every cell mass.
+- **Snap, do not interpolate.** With `surface_radius` given, pick the nearest
+  shell and report it back as `r_used`. The caller tells the user what it
+  moved to.
+
+`--weight-grid native` will raise if the method is missing, `auto` falls back
+silently, and the base-class implementation raises `NotImplementedError` with
+a message naming your class -- so the fallback is detected by the method not
+being overridden, not by a flag you have to set.

@@ -91,6 +91,58 @@ class ReducedSurfaceFileHandler(FileHandler):
 
         return time, file_path, avail_keys, extra_data["mem_size"]
 
+    def native_cell_weights(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        surface_radius: float | None = None,
+        ) -> tuple[tuple[np.ndarray, ...], np.ndarray, float | None]:
+        """
+        See :meth:`~src.file.FileHandler.native_cell_weights`.
+
+        This format is a single global (r, theta, phi) grid, so the cells are
+        the dumped samples themselves. Edges follow the layout documented in
+        ``docs/formats/gr_athena.md``: ``r`` is geometric, so a sample sits at
+        the geometric centre of ``[r/sqrt(q), r*sqrt(q)]``; ``theta`` and
+        ``phi`` are uniform and cell-centred, so a sample spans half a spacing
+        either side, and their edges tile ``[0, pi]`` and ``[0, 2pi]`` exactly.
+        Ghost zones are stripped before anything is returned.
+        """
+        ng = self.n_ghosts
+        r = np.asarray(self.extra_data["r"], dtype=float)
+        th = np.asarray(self.extra_data["th"], dtype=float)[ng:-ng]
+        ph = np.asarray(self.extra_data["ph"], dtype=float)[ng:-ng]
+        shape = self.extra_data["shape"]
+
+        dth = th[1] - th[0]
+        dph = ph[1] - ph[0]
+        cth_edges = np.concatenate((np.cos(th - dth / 2), [np.cos(th[-1] + dth / 2)]))
+        ph_edges = np.concatenate((ph - dph / 2, [ph[-1] + dph / 2]))
+
+        if surface_radius is None:
+            q = float(r[1] / r[0])          # constant, the grid is geometric
+            r_edges = np.concatenate((r / np.sqrt(q), [r[-1] * np.sqrt(q)]))
+            i_r = slice(None)
+            edges: tuple[np.ndarray, ...] = (r_edges, cth_edges, ph_edges)
+            r_used = None
+        else:
+            j = int(np.argmin(np.abs(r - surface_radius)))
+            i_r = slice(j, j + 1)
+            edges = (cth_edges, ph_edges)
+            r_used = float(r[j])
+
+        n_cells = (len(r) if surface_radius is None else 1) * len(th) * len(ph)
+        values = np.empty((len(keys), n_cells))
+        for i_k, key in enumerate(keys):
+            shm = SharedMemory(name=self.shared_memory[slot][key])
+            try:
+                buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
+                values[i_k] = buf[i_r, ng:-ng, ng:-ng].ravel()
+            finally:
+                shm.close()
+
+        return edges, values, r_used
+
     @staticmethod
     def load_step_to_memory(
         metadata_dict: dict[str, list[str]],

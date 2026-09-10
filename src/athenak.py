@@ -522,6 +522,74 @@ class AthenaKFileHandler(FileHandler):
             return 0.0, "", [], 0
         return info['time'], file_path, avail_keys, extra_data['mem_size']
 
+    def native_cell_weights(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        surface_radius: float | None = None,
+        ) -> tuple[tuple[np.ndarray, ...], np.ndarray, float | None]:
+        """
+        See :meth:`~src.file.FileHandler.native_cell_weights`.
+
+        AthenaK writes a single global spherical grid, so the cells are the
+        dumped samples. Three conventions have to be honoured, all detected in
+        :func:`polar_axis` and recorded in ``extra_data``:
+
+        * the radial axis is geometric, so edges sit at the midpoints in
+          ``ln r``, extrapolated half a step at each end;
+        * the polar axis is uniform in ``theta`` *or* in ``mu = cos(theta)``,
+          so edges are built in whichever one it is and only then converted;
+        * a node-centred polar axis puts its first and last samples *on* the
+          poles, where the cell is a half cell. Clipping the edges to the
+          physical range handles that on its own.
+
+        The returned ``cos(theta)`` edges are monotone but may ascend or
+        descend, depending on the convention; callers must not assume a
+        direction.
+        """
+        ng = self.n_ghosts
+        r = np.asarray(self.extra_data['r'], dtype=float)
+        nodes = np.asarray(self.extra_data['polar_nodes'], dtype=float)[ng:-ng]
+        ph = np.asarray(self.extra_data['ph'], dtype=float)[ng:-ng]
+        shape = self.extra_data['shape']
+
+        d_polar = nodes[1] - nodes[0]
+        polar_edges = np.concatenate((nodes - d_polar / 2, [nodes[-1] + d_polar / 2]))
+        if self.extra_data['polar'] == 'mu':
+            cth_edges = np.clip(polar_edges, -1.0, 1.0)
+        else:
+            cth_edges = np.cos(np.clip(polar_edges, 0.0, np.pi))
+
+        d_ph = ph[1] - ph[0]
+        ph_edges = np.concatenate((ph - d_ph / 2, [ph[-1] + d_ph / 2]))
+
+        if surface_radius is None:
+            ln_r = np.log(r)
+            mid = (ln_r[:-1] + ln_r[1:]) / 2
+            r_edges = np.exp(np.concatenate((
+                [2 * ln_r[0] - mid[0]], mid, [2 * ln_r[-1] - mid[-1]])))
+            i_r = slice(None)
+            edges: tuple[np.ndarray, ...] = (r_edges, cth_edges, ph_edges)
+            r_used = None
+            n_r_sel = len(r)
+        else:
+            j = int(np.argmin(np.abs(r - surface_radius)))
+            i_r = slice(j, j + 1)
+            edges = (cth_edges, ph_edges)
+            r_used = float(r[j])
+            n_r_sel = 1
+
+        values = np.empty((len(keys), n_r_sel * (len(cth_edges) - 1) * len(ph)))
+        for i_k, key in enumerate(keys):
+            shm = SharedMemory(name=self.shared_memory[slot][key])
+            try:
+                buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
+                values[i_k] = buf[i_r, ng:-ng, ng:-ng].ravel()
+            finally:
+                shm.close()
+
+        return edges, values, r_used
+
     @staticmethod
     def load_step_to_memory(
         metadata_dict: dict[str, list[str]],

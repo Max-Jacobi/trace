@@ -728,3 +728,97 @@ class TestHeavyNeutrinos:
                 interpolator_kwargs={"max_cache_size_GB": 0.05},
                 heavy_neutrinos="bogus",
             )
+
+
+class TestNativeCellWeights:
+    """
+    The native weight grid for the mass-weighted seeding modes.
+
+    The thing worth checking is that the edges *tile* the sphere: whatever
+    convention the polar axis is in, and whether or not its samples sit on
+    the poles, the cell measures have to sum to the full solid angle. If they
+    do not, every sampled mass is wrong by the same factor and nothing
+    downstream would notice.
+    """
+
+    @staticmethod
+    def _loaded(tmp_path, convention):
+        make_dataset(tmp_path, times=[0.0, 10.0], keys=("dens",),
+                     convention=convention)
+        fh = TestFileHandler._handler(None, tmp_path, ["rho"])
+        fh.load_chunk(0, forward=True)
+        return fh
+
+    @pytest.mark.parametrize("convention", ["mu_node", "theta_cell"])
+    def test_edges_tile_the_full_solid_angle(self, tmp_path, convention):
+        fh = self._loaded(tmp_path, convention)
+        try:
+            (r_e, c_e, p_e), vals, r_used = fh.native_cell_weights(0, ("rho",))
+            assert r_used is None
+            # sum |dcos(theta)| dphi over every cell == 4 pi
+            solid = np.abs(np.diff(c_e)).sum() * np.diff(p_e).sum()
+            assert solid == pytest.approx(4 * np.pi, rel=1e-12)
+            assert vals.shape == (1, (len(r_e) - 1) * (len(c_e) - 1) * (len(p_e) - 1))
+        finally:
+            fh.free_shared_memory()
+
+    @pytest.mark.parametrize("convention", ["mu_node", "theta_cell"])
+    def test_cos_theta_edges_span_the_poles_and_stay_monotone(self, tmp_path, convention):
+        """
+        Clipping to [-1, 1] is what makes a node-centred axis work: its first
+        and last samples sit *on* the poles and so own only half a cell.
+        """
+        fh = self._loaded(tmp_path, convention)
+        try:
+            (_, c_e, _), _, _ = fh.native_cell_weights(0, ("rho",))
+            assert min(c_e[0], c_e[-1]) == pytest.approx(-1.0)
+            assert max(c_e[0], c_e[-1]) == pytest.approx(1.0)
+            d = np.diff(c_e)
+            assert np.all(d > 0) or np.all(d < 0)
+        finally:
+            fh.free_shared_memory()
+
+    def test_surface_radius_snaps_to_a_shell(self, tmp_path):
+        fh = self._loaded(tmp_path, "mu_node")
+        try:
+            r = np.asarray(fh.extra_data['r'])
+            target = float(r[3]) * 1.01          # deliberately off-grid
+            edges, vals, r_used = fh.native_cell_weights(0, ("rho",),
+                                                         surface_radius=target)
+            assert r_used == pytest.approx(float(r[3]))
+            assert len(edges) == 2                # (cos_theta, phi) only
+            assert vals.shape[1] == (len(edges[0]) - 1) * (len(edges[1]) - 1)
+        finally:
+            fh.free_shared_memory()
+
+    def test_values_match_the_interpolator_at_a_cell_centre(self, tmp_path):
+        """
+        The point of going native is skipping the interpolator, so the two
+        must agree where they overlap -- PCHIP reproduces its nodes exactly.
+        """
+        fh = self._loaded(tmp_path, "theta_cell")
+        try:
+            (r_e, c_e, p_e), vals, _ = fh.native_cell_weights(0, ("rho",))
+            n_c, n_p = len(c_e) - 1, len(p_e) - 1
+            i_r, i_c, i_p = 5, 4, 3
+            # The node, not the midpoint of the cell: a cell-centred theta grid
+            # puts its sample at the middle in theta, which is not the middle
+            # in cos(theta), and the native value belongs to the sample.
+            ng = fh.n_ghosts
+            r_c = np.asarray(fh.extra_data['r'])[i_r]
+            th_c = float(np.asarray(fh.extra_data['polar_nodes'])[ng + i_c])
+            ph_c = float(np.asarray(fh.extra_data['ph'])[ng + i_p])
+            pos = np.array([[r_c * np.sin(th_c) * np.cos(ph_c)],
+                            [r_c * np.sin(th_c) * np.sin(ph_c)],
+                            [r_c * np.cos(th_c)]])
+            interp = type(fh).setup_interpolator(
+                {"rho": fh.shared_memory[0]["rho"]}, fh.extra_data)
+            interp.load()
+            try:
+                want = float(interp(pos)[0][0])
+            finally:
+                interp.unload()
+            got = vals[0].reshape(-1, n_c, n_p)[i_r, i_c, i_p]
+            assert got == pytest.approx(want, rel=1e-6)
+        finally:
+            fh.free_shared_memory()
