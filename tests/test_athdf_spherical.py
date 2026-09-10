@@ -458,3 +458,181 @@ class TestOctree:
             SphericalAthdfFileHandler(
                 interpolator=MeshblockPchipInterpolator, directory=str(tmp_path),
                 keys=['rho'], n_cpu=1, files_per_step=1, bh_mass=0.0)
+
+
+class TestNativeCellWeights:
+    """
+    The native weight grid for the mass-weighted seeding modes.
+
+    Meshblocks are the reason the hook returns a list rather than one grid, so
+    the tests that matter are about the blocks together covering the region
+    exactly once. Getting edges or ghosts wrong scales every sampled mass by
+    the same factor, and no downstream check would notice.
+    """
+
+    R_LIM = (10.0, 50.0)
+    INTERIOR = (4, 4, 4)
+
+    def _handler(self, directory, levels=None, locations=None):
+        return SphericalAthdfFileHandler(
+            interpolator=MeshblockPchipInterpolator, directory=str(directory),
+            keys=['rho'], n_cpu=1, files_per_step=1, bh_mass=0.0)
+
+    def _loaded(self, tmp_path, levels=None, locations=None):
+        write_athdf(tmp_path / 's.00000.athdf', 0.0, {'prim': {'rho': smooth_field}},
+                    levels=levels, locations=locations)
+        fh = self._handler(tmp_path)
+        fh.load_chunk(0, True)
+        return fh
+
+    @staticmethod
+    def _volume(blocks):
+        total = 0.0
+        for (r_e, c_e, p_e), _ in blocks:
+            total += float(((np.diff(r_e ** 3) / 3)[:, None, None]
+                            * np.abs(np.diff(c_e))[None, :, None]
+                            * np.diff(p_e)[None, None, :]).sum())
+        return total
+
+    def test_cells_tile_the_domain_volume(self, tmp_path):
+        """
+        The blocks together must fill the shell exactly once. Tolerance is
+        1e-6, not machine epsilon: the writer stores faces as float32, as real
+        Athena++ dumps do, so faces shared between blocks telescope only to
+        float32 precision.
+        """
+        fh = self._loaded(tmp_path)
+        try:
+            blocks, r_used = fh.native_cell_weights(0, ("rho",))
+            assert r_used is None
+            r_lo, r_hi = self.R_LIM
+            exact = 4 * np.pi * (r_hi ** 3 - r_lo ** 3) / 3
+            assert self._volume(blocks) == pytest.approx(exact, rel=1e-6)
+        finally:
+            fh.free_shared_memory()
+
+    def test_multilevel_blocks_tile_exactly(self, tmp_path):
+        """
+        The one test that catches a coarse/fine double count or gap. A parent
+        block left in alongside its children would inflate this sum by its own
+        volume, and nothing else in the pipeline would flag it.
+        """
+        levels, locs = TestOctree()._amr_layout()
+        fh = self._loaded(tmp_path, levels=levels, locations=locs)
+        try:
+            blocks, _ = fh.native_cell_weights(0, ("rho",))
+            assert len(blocks) == 15          # 7 coarse + 8 refined children
+            r_lo, r_hi = self.R_LIM
+            exact = 4 * np.pi * (r_hi ** 3 - r_lo ** 3) / 3
+            assert self._volume(blocks) == pytest.approx(exact, rel=1e-6)
+        finally:
+            fh.free_shared_memory()
+
+    def test_ghost_cells_are_excluded(self, tmp_path):
+        """
+        A leaked ghost layer pushes a block's faces outside the domain, so the
+        global min/max radius is the sharpest single signal for it.
+        """
+        fh = self._loaded(tmp_path)
+        try:
+            blocks, _ = fh.native_cell_weights(0, ("rho",))
+            n_int = int(np.prod(self.INTERIOR))
+            assert sum(v.shape[1] for _, v in blocks) == len(blocks) * n_int
+            for (r_e, c_e, p_e), vals in blocks:
+                assert (len(r_e) - 1, len(c_e) - 1, len(p_e) - 1) == self.INTERIOR
+                assert vals.shape == (1, n_int)
+            r_all = np.concatenate([e[0] for e, _ in blocks])
+            assert r_all.min() == pytest.approx(self.R_LIM[0], rel=1e-6)
+            assert np.concatenate([e[0] for e, _ in blocks]).max() \
+                == pytest.approx(self.R_LIM[1], rel=1e-6)
+        finally:
+            fh.free_shared_memory()
+
+    @pytest.mark.parametrize("r_surf", [30.0, 25.0])
+    def test_surface_cells_cover_the_sphere(self, tmp_path, r_surf):
+        """
+        30.0 is the headline case: it sits exactly on an interior block face,
+        where a left/right mixup in the radial search takes two radial layers
+        instead of one and doubles the solid angle.
+        """
+        fh = self._loaded(tmp_path)
+        try:
+            blocks, r_used = fh.native_cell_weights(0, ("rho",), surface_radius=r_surf)
+            assert r_used is None            # nothing was snapped
+            solid = 0.0
+            for edges, vals in blocks:
+                assert len(edges) == 2       # (cos theta, phi) only
+                c_e, p_e = edges
+                assert vals.shape == (1, (len(c_e) - 1) * (len(p_e) - 1))
+                solid += float((np.abs(np.diff(c_e))[:, None]
+                                * np.diff(p_e)[None, :]).sum())
+            assert solid == pytest.approx(4 * np.pi, rel=1e-6)
+        finally:
+            fh.free_shared_memory()
+
+    def test_values_match_the_interpolator_at_a_cell_centre(self, tmp_path):
+        """
+        The point of going native is skipping the interpolator, so the two must
+        agree where they overlap: PCHIP reproduces its own nodes.
+        """
+        fh = self._loaded(tmp_path)
+        try:
+            blocks, _ = fh.native_cell_weights(0, ("rho",))
+            ng = fh.extra_data['file_ng']
+            b, i, j, k = 3, 1, 2, 0
+            r_c = fh.extra_data['x1v'][b, ng + i]
+            th_c = fh.extra_data['x2v'][b, ng + j]
+            ph_c = fh.extra_data['x3v'][b, ng + k]
+            pos = np.array(sph_to_cart(r_c, th_c, ph_c)).reshape(3, 1)
+            interp = fh.setup_interpolators(fh.keys, fh.shared_memory,
+                                            fh.extra_data)[0]
+            interp.load()
+            try:
+                want = float(interp(pos)[0][0])
+            finally:
+                interp.unload()
+            got = blocks[b][1][0].reshape(self.INTERIOR)[i, j, k]
+            assert got == pytest.approx(want, rel=1e-6)
+        finally:
+            fh.free_shared_memory()
+
+    @pytest.mark.parametrize("r_surf", [30.0, 25.0, 27.5])
+    def test_surface_takes_the_cell_containing_the_radius(self, tmp_path, r_surf):
+        """
+        The solid-angle test alone cannot see a wrong *radial* layer: it still
+        returns one cell per angular patch either way. Pin it by value, against
+        the interpolator at the containing cell's own node.
+        """
+        fh = self._loaded(tmp_path)
+        try:
+            blocks, _ = fh.native_cell_weights(0, ("rho",), surface_radius=r_surf)
+            ng = fh.extra_data['file_ng']
+            x1f, x1v = fh.extra_data['x1f'], fh.extra_data['x1v']
+            interp = fh.setup_interpolators(fh.keys, fh.shared_memory,
+                                            fh.extra_data)[0]
+            interp.load()
+            try:
+                checked = 0
+                for b in range(fh.extra_data['shape'][0]):
+                    r_e = x1f[b, ng:ng + self.INTERIOR[0] + 1]
+                    if not (r_e[0] <= r_surf < r_e[-1]):
+                        continue
+                    i_r = int(np.searchsorted(r_e, r_surf, 'right')) - 1
+                    # the chosen cell must actually straddle the sphere
+                    assert r_e[i_r] <= r_surf < r_e[i_r + 1]
+                    c_e, p_e = blocks[checked][0]
+                    vals = blocks[checked][1][0].reshape(len(c_e) - 1, len(p_e) - 1)
+                    j, k = 1, 2
+                    pos = np.array(sph_to_cart(
+                        x1v[b, ng + i_r],
+                        fh.extra_data['x2v'][b, ng + j],
+                        fh.extra_data['x3v'][b, ng + k],
+                    )).reshape(3, 1)
+                    assert vals[j, k] == pytest.approx(float(interp(pos)[0][0]),
+                                                       rel=1e-6)
+                    checked += 1
+                assert checked == len(blocks) > 0
+            finally:
+                interp.unload()
+        finally:
+            fh.free_shared_memory()

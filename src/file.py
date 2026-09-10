@@ -128,22 +128,27 @@ class FileHandler(ABC):
         slot: int,
         keys: tuple[str, ...],
         surface_radius: float | None = None,
-        ) -> tuple[tuple[np.ndarray, ...], np.ndarray, float | None]:
+        ) -> tuple[list[tuple[tuple[np.ndarray, ...], np.ndarray]], float | None]:
         """
-        The format's **own** grid, as cell edges plus the field values on it.
+        The format's **own** cells, as edges plus the field values on them.
 
-        Optional. Formats that store their data on a single global spherical
-        grid can implement this so mass-weighted seeding samples the data as
-        written, instead of interpolating it onto a helper grid first. That
-        removes the interpolation error and the midpoint rule, and is *cheaper*
-        -- the helper route's cost is dominated by building an interpolator per
-        sampled snapshot, not by evaluating it. Formats without one global grid
-        (an octree of meshblocks, say) should leave this alone; callers fall
-        back to the helper grid.
+        Optional. Implement it if the format can say where its cells are and
+        what is in them, so mass-weighted seeding samples the data as written
+        instead of interpolating it onto a helper grid first. That removes the
+        interpolation error and the midpoint rule, and is *cheaper* -- the
+        helper route's cost is dominated by building an interpolator per
+        sampled snapshot, not by evaluating it.
 
-        Edges rather than centres, so a caller can size cells, place tracers
+        The return is a **list of blocks**, each a separable grid of its own.
+        A format holding one global spherical grid returns a single block; a
+        block-structured or AMR format returns one entry per meshblock. The
+        only requirements are that the blocks **tile the region without
+        overlapping** -- otherwise the sampled mass is double counted where
+        they do -- and that ghost cells are excluded.
+
+        Edges rather than centres, so a caller can size cells, place points
         inside them and integrate over them with exactly the code it uses for
-        the helper grid.
+        a helper grid.
 
         Parameters
         ----------
@@ -153,32 +158,31 @@ class FileHandler(ABC):
         keys : tuple of str
             Fields to return values for; must be among ``self.keys``.
         surface_radius : float or None
-            When None, return the full 3-D grid. Otherwise return only the
-            shell nearest this radius. The radius is snapped to the grid, which
-            is the point: no radial interpolation happens either.
+            When None, return volume cells. Otherwise return only the cells
+            covering that sphere, with two axes instead of three.
 
         Returns
         -------
-        edges : tuple of ndarray
-            ``(r_edges, cos_theta_edges, phi_edges)``, or
+        blocks : list of (edges, values)
+            ``edges`` is ``(r_edges, cos_theta_edges, phi_edges)``, or
             ``(cos_theta_edges, phi_edges)`` when ``surface_radius`` is given.
-            ``cos_theta_edges`` is monotone but may ascend or descend --
-            AthenaK's equal-solid-angle grids run the other way from
-            GR-Athena++'s -- so callers must not assume a direction. Taking
-            ``abs`` of the differences for a measure and carrying their sign
-            when placing points inside a cell handles both.
-        values : ndarray, shape (len(keys), n_cells)
-            Field values, C-ordered over the cells those edges define.
+            ``values`` has shape ``(len(keys), n_cells)``, C-ordered over the
+            cells those edges define. ``cos_theta_edges`` is monotone but may
+            ascend or descend -- AthenaK's equal-solid-angle grids run the
+            other way from GR-Athena++'s -- so callers must not assume a
+            direction. Taking ``abs`` of the differences for a measure and
+            carrying their sign when placing points inside a cell handles both.
         r_used : float or None
-            The grid radius actually used, when ``surface_radius`` was given.
+            The radius the cells actually sit at, when ``surface_radius`` was
+            given and the format snapped it to its own grid.
 
         Raises
         ------
         NotImplementedError
-            If this format has no single global grid to weight on.
+            If this format cannot enumerate its cells.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} has no single global grid to weight on; "
+            f"{type(self).__name__} cannot enumerate its own cells; "
             "use --weight-grid helper."
         )
 

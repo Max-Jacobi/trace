@@ -241,6 +241,7 @@ class SphericalAthdfFileHandler(FileHandler):
             locations = f['LogicalLocations'][:].astype(int)
             x1f = f['x1f'][:].astype(np.float64)
             x2f = f['x2f'][:].astype(np.float64)
+            x3f = f['x3f'][:].astype(np.float64)
             nodes = [f[f'x{a}v'][:].astype(np.float64) for a in (1, 2, 3)]
 
         # Ghost count: the innermost block's face closest to the domain
@@ -290,6 +291,10 @@ class SphericalAthdfFileHandler(FileHandler):
         shape = (n_blocks, *(int(n) for n in mb_size))
         self.extra_data.update(
             x1v=nodes[0], x2v=nodes[1], x3v=nodes[2],
+            # Cell faces per block, kept for native_cell_weights: cell volumes
+            # need real edges and cannot be recovered from the centres, since
+            # the radial spacing inside a block need not be uniform.
+            x1f=x1f, x2f=x2f, x3f=x3f,
             block_map=block_map,
             root_faces=tuple(
                 _root_faces(spec, n) for spec, n in zip(root_spec, root_size)
@@ -305,6 +310,103 @@ class SphericalAthdfFileHandler(FileHandler):
             mem_size=int(np.prod(shape)) * 8,
             key_specs=_build_key_specs(self.keys),
         )
+
+    def native_cell_weights(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        surface_radius: float | None = None,
+        ) -> tuple[list[tuple[tuple[np.ndarray, ...], np.ndarray]], float | None]:
+        """
+        See :meth:`~src.file.FileHandler.native_cell_weights`.
+
+        One entry per meshblock. The blocks are leaves and tile the domain --
+        ``load_grid`` refuses a file where they do not -- so their cells are a
+        partition and nothing is double counted.
+
+        Ghosts are stripped with ``file_ng``, the count the file actually
+        carries, not ``self.n_ghosts``, which is only the interpolator's
+        minimum. Conveniently the same slice does both jobs: on a face array of
+        length ``nb + 1`` it leaves ``interior + 1`` faces, and on a value array
+        of length ``nb`` it leaves ``interior`` cells.
+
+        Volumes come from ``x1f`` rather than from midpoints of ``x1v`` because
+        the radial spacing inside a block is generally geometric. ``x2f`` needs
+        no polar correction: ``_fix_polar_ghost_nodes`` only rewrites ghost
+        entries of ``x2v``, and interior faces are always within ``[0, pi]``.
+        """
+        ng = self.extra_data['file_ng']
+        i1, i2, i3 = self.extra_data['interior']
+        x1f = self.extra_data['x1f']
+        x2f = self.extra_data['x2f']
+        x3f = self.extra_data['x3f']
+        shape = self.extra_data['shape']
+        n_blocks = shape[0]
+        # Slice by explicit extent rather than ng:-ng. file_ng is only
+        # guaranteed >= the interpolator's requirement, and a future
+        # interpolator needing none would turn ng:-ng into an empty 0:0.
+        s2, s3 = slice(ng, ng + i2), slice(ng, ng + i3)
+
+        interior = []
+        shms = []
+        try:
+            for key in keys:
+                shm = SharedMemory(name=self.shared_memory[slot][key])
+                shms.append(shm)
+                buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
+                interior.append(buf[:, ng:-ng, ng:-ng, ng:-ng])
+
+            blocks: list[tuple[tuple[np.ndarray, ...], np.ndarray]] = []
+            for b in range(n_blocks):
+                r_e = x1f[b, ng:ng + i1 + 1]
+                cth_e = np.cos(x2f[b, ng:ng + i2 + 1])
+                ph_e = x3f[b, ng:ng + i3 + 1]
+
+                if surface_radius is None:
+                    edges: tuple[np.ndarray, ...] = (r_e, cth_e, ph_e)
+                    vals = np.stack([v[b].ravel() for v in interior])
+                else:
+                    # Half-open on purpose. A block whose lower interior face
+                    # equals r_surf owns it; its inner neighbour, whose upper
+                    # face equals it, does not. So exactly one radial layer is
+                    # taken even when the sphere lands on a block boundary.
+                    if not (r_e[0] <= surface_radius < r_e[-1]):
+                        continue
+                    i_r = int(np.searchsorted(r_e, surface_radius, 'right')) - 1
+                    if not 0 <= i_r < i1:
+                        # Unreachable given the bounds check above, but a
+                        # negative index would silently wrap to the outermost
+                        # cell and hand back the wrong radius' worth of flux.
+                        continue
+                    edges = (cth_e, ph_e)
+                    vals = np.stack([v[b, i_r].ravel() for v in interior])
+
+                blocks.append((edges, vals))
+        finally:
+            for shm in shms:
+                shm.close()
+
+        if surface_radius is not None and not blocks:
+            raise ValueError(
+                f"No meshblock spans r = {surface_radius:g}; the requested "
+                "surface lies outside the domain."
+            )
+
+        # r_used is None: nothing was snapped. Unlike a format storing discrete
+        # shells, a cell here has radial *extent* containing the request, and
+        # its value is the field across that extent, so the sphere the caller
+        # asked for is the one to attribute the flux to.
+        #
+        # Using per-block cell-centre radii instead would be wrong, not merely
+        # different: under AMR the blocks meeting r_surf sit at different
+        # levels with different radial cells, so there is no single radius, and
+        # the "sphere" becomes a ragged staircase whose areas do not sum to
+        # 4*pi*r**2 -- biasing the total flux by whatever the level
+        # distribution happens to be. The residual, a cell's sample radius
+        # differing from the surface by up to half a radial cell, is the same
+        # O(dr/r) the nearest-shell formats already accept, and is unsigned
+        # across blocks so it does not accumulate.
+        return blocks, None
 
     @staticmethod
     def parse_file(

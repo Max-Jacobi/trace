@@ -104,3 +104,33 @@ axis): a query point maps to a root-grid cell by binary search on the three
 reconstructed root face arrays, then to its meshblock by integer arithmetic
 and one table lookup -- O(1) per point, fully vectorised, for any static
 octree.
+
+## Native weight grid
+
+The mass-weighted seeding modes (`volume-mc`, `surface-mc`) can build their
+sampling weights on this format's own cells, with no interpolation and no
+helper grid. `--weight-grid auto` picks it; `--weight-grid native` says so
+explicitly and errors rather than falling back.
+
+An octree has no single global grid, but its meshblocks tile the domain, so
+the reader hands back one entry per block. `load_grid` already refuses a file
+whose blocks do not tile, which is what makes this safe: cells counted twice
+would be mass counted twice.
+
+Two things specific to this format:
+
+- **`r_surf` is not snapped.** Formats that store discrete shells must move a
+  requested radius onto one of them. Here a cell has radial *extent*
+  containing the request and its value is the field across that extent, so the
+  sphere you asked for is the one the flux is attributed to. Using per-block
+  cell-centre radii instead would be wrong rather than merely different: under
+  AMR the blocks meeting the sphere sit at different levels with different
+  radial cells, so there is no single radius, and the "sphere" becomes a
+  ragged staircase whose areas do not sum to `4*pi*r**2`.
+- **Under AMR the angular resolution on that sphere is non-uniform**, since
+  blocks at different refinement levels contribute different cell sizes. The
+  cells still tile it exactly. That is correct, but it surprises people.
+
+Verified against a real dump (256 blocks, `MeshBlockSize` 20³, 2 ghost cells):
+summing `rho*dV` over the returned cells reproduces the same sum computed
+straight from the HDF5, over the same 307,200 cells, to five decimal places.

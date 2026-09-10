@@ -753,7 +753,11 @@ class TestNativeCellWeights:
     def test_edges_tile_the_full_solid_angle(self, tmp_path, convention):
         fh = self._loaded(tmp_path, convention)
         try:
-            (r_e, c_e, p_e), vals, r_used = fh.native_cell_weights(0, ("rho",))
+            blocks, r_used = fh.native_cell_weights(0, ("rho",))
+            # One global grid, so exactly one block -- the contract's
+            # single-grid case, worth pinning explicitly.
+            assert len(blocks) == 1
+            (r_e, c_e, p_e), vals = blocks[0]
             assert r_used is None
             # sum |dcos(theta)| dphi over every cell == 4 pi
             solid = np.abs(np.diff(c_e)).sum() * np.diff(p_e).sum()
@@ -770,7 +774,8 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, convention)
         try:
-            (_, c_e, _), _, _ = fh.native_cell_weights(0, ("rho",))
+            blocks, _ = fh.native_cell_weights(0, ("rho",))
+            (_, c_e, _), _ = blocks[0]
             assert min(c_e[0], c_e[-1]) == pytest.approx(-1.0)
             assert max(c_e[0], c_e[-1]) == pytest.approx(1.0)
             d = np.diff(c_e)
@@ -783,8 +788,10 @@ class TestNativeCellWeights:
         try:
             r = np.asarray(fh.extra_data['r'])
             target = float(r[3]) * 1.01          # deliberately off-grid
-            edges, vals, r_used = fh.native_cell_weights(0, ("rho",),
-                                                         surface_radius=target)
+            blocks, r_used = fh.native_cell_weights(0, ("rho",),
+                                                    surface_radius=target)
+            assert len(blocks) == 1
+            edges, vals = blocks[0]
             assert r_used == pytest.approx(float(r[3]))
             assert len(edges) == 2                # (cos_theta, phi) only
             assert vals.shape[1] == (len(edges[0]) - 1) * (len(edges[1]) - 1)
@@ -798,7 +805,8 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, "theta_cell")
         try:
-            (r_e, c_e, p_e), vals, _ = fh.native_cell_weights(0, ("rho",))
+            blocks, _ = fh.native_cell_weights(0, ("rho",))
+            (r_e, c_e, p_e), vals = blocks[0]
             n_c, n_p = len(c_e) - 1, len(p_e) - 1
             i_r, i_c, i_p = 5, 4, 3
             # The node, not the midpoint of the cell: a cell-centred theta grid

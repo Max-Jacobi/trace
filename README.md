@@ -89,12 +89,12 @@ python run_pipeline.py --format athenak \
     volume-mc --r-min 300 --r-max 1000 --n-tracers 20000 --weight-grid native
 
 # Athena++ meshblock athdf (written with ghost zones): no preparation step.
-# An octree of meshblocks has no single global grid, so this one falls back to
-# the interpolated helper grid; the seeding modes are otherwise identical.
+# An octree has no single global grid, but its meshblocks tile the domain, so
+# native works here too -- one entry per block.
 python run_pipeline.py --format athdf_spherical \
     --data-dir /path/to/athdf --output-dir data/tracers_out \
     --start-t 40.9446 --end-t 0 --bh-mass 1.0 --adm-mass 2.7 \
-    volume-mc --r-min 305 --r-max 1000 --n-tracers 20000
+    volume-mc --r-min 305 --r-max 1000 --n-tracers 20000 --weight-grid native
 
 # Each tracer's full history is now one ASCII file:
 ls data/tracers_out/           # tracer_000000.dat, tracer_000001.dat, ...
@@ -431,6 +431,10 @@ build their sampling weights. Two ways to get it:
   back to `helper` otherwise. `native` errors rather than falling back, so a
   run cannot silently change what it sampled.
 
+Every format shipped here implements it: `reduced_surface` and `athenak` hold
+one global grid, and `athdf_spherical` hands over one entry per meshblock. A
+format that cannot enumerate its cells falls back to `helper` under `auto`.
+
 `native` is both more accurate and **faster**, which is the opposite of what
 the cell counts suggest. The helper route's cost is dominated by building an
 interpolator per sampled snapshot, not by evaluating it, and the native route
@@ -453,8 +457,8 @@ features, not a smoother `mdot`.
 
 To give a new format a native grid, implement `native_cell_weights` on its
 `FileHandler` (see [docs/writing_a_reader.md](docs/writing_a_reader.md)). It
-is optional: formats without a single global grid, such as an octree of
-meshblocks, simply leave it alone.
+is optional, and the only real requirement is that the cells it hands back
+**tile the region without overlapping** -- they need not form one grid.
 
 ## Running on a cluster (SLURM)
 

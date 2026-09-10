@@ -96,7 +96,7 @@ class ReducedSurfaceFileHandler(FileHandler):
         slot: int,
         keys: tuple[str, ...],
         surface_radius: float | None = None,
-        ) -> tuple[tuple[np.ndarray, ...], np.ndarray, float | None]:
+        ) -> tuple[list[tuple[tuple[np.ndarray, ...], np.ndarray]], float | None]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
@@ -141,7 +141,8 @@ class ReducedSurfaceFileHandler(FileHandler):
             finally:
                 shm.close()
 
-        return edges, values, r_used
+        # One global grid, so a single block.
+        return [(edges, values)], r_used
 
     @staticmethod
     def load_step_to_memory(

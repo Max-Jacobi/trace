@@ -228,7 +228,9 @@ Once your handler runs, check these before trusting a production run:
 ## Optional: `native_cell_weights`
 
 Nothing above requires it, and a reader that omits it is complete. Implement
-it only if your format keeps its data on a *single global spherical grid*.
+it if your format can enumerate its own cells. It does **not** need one global
+grid: the return is a list of blocks, and a block-structured or AMR format
+returns one entry per meshblock. `athdf_spherical` does exactly that.
 
 The mass-weighted `-mc` seeding modes need the density, or the mass flux, over
 the seeding region in order to build their sampling weights. By default they
@@ -237,15 +239,22 @@ already has a grid, that is a waste twice over: it costs an interpolator build
 per sampled snapshot, and it puts an interpolation error and a midpoint rule
 between the data and the weights.
 
-`native_cell_weights(slot, keys, surface_radius=None)` hands the seeder the
-grid instead. Return **cell edges** rather than centres -- `(r_edges,
-cos_theta_edges, phi_edges)`, or `(cos_theta_edges, phi_edges)` for a single
-shell -- plus the field values C-ordered over the cells those edges define,
-and the grid radius actually used. Edges let the caller size cells, place
-tracers inside them and integrate over them with exactly the code it uses for
-the helper grid, so nothing downstream needs to know which route was taken.
+`native_cell_weights(slot, keys, surface_radius=None)` hands the seeder those
+cells instead. Return a **list of blocks**, each **cell edges** rather than
+centres -- `(r_edges, cos_theta_edges, phi_edges)`, or `(cos_theta_edges,
+phi_edges)` for a single shell -- paired with the field values C-ordered over
+the cells those edges define, plus the radius actually used. Edges let the
+caller size cells, place tracers inside them and integrate over them with
+exactly the code it uses for the helper grid, so nothing downstream needs to
+know which route was taken, or how many blocks it got.
 
-Three things to get right:
+Four things to get right:
+
+- **The blocks must tile the region without overlapping.** This is the one
+  requirement that is not obvious and not checked for you. Cells counted twice
+  are mass counted twice, and it biases every sampled tracer silently. Under
+  AMR, be sure you are handing back leaves only. `athdf_spherical` gets this
+  from the octree check `load_grid` already performs.
 
 - **Strip ghost zones** before returning anything. The values must line up
   with the edges, one per cell.
@@ -255,7 +264,9 @@ Three things to get right:
   spacing either side. Getting this wrong biases every cell mass.
 - **Snap, do not interpolate.** With `surface_radius` given, pick the nearest
   shell and report it back as `r_used`. The caller tells the user what it
-  moved to.
+  moved to. Return `None` if you did not snap -- a format whose cells have
+  radial *extent* containing the requested radius has nothing to move, and
+  `None` says so, leaving the caller's own radius in place.
 
 `--weight-grid native` will raise if the method is missing, `auto` falls back
 silently, and the base-class implementation raises `NotImplementedError` with

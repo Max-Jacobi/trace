@@ -259,3 +259,53 @@ class TestConservativeDensity:
         m_dens = _masses(self._seed(self.ADM_MASS)).sum()
         assert m_dens / m_plain == pytest.approx(-self.U_T, rel=0.05)
         assert m_dens > m_plain
+
+
+class _TwoBlockHandler(MockFileHandler):
+    """
+    A handler whose native cells arrive as two adjacent radial blocks, with the
+    density non-zero in only one of them.
+
+    The seeder flattens blocks into a single index, so a mistake in the
+    block/local-index split is invisible to any total: the mass still sums
+    correctly, it is simply attributed to the wrong cells. Emptying one block
+    turns that into something observable -- every tracer must land in the
+    other.
+    """
+
+    SPLIT = 400.0
+
+    def native_cell_weights(self, slot, keys, surface_radius=None):
+        n = 8
+        cth = np.linspace(1.0, -1.0, 5)
+        ph = np.linspace(0.0, 2 * np.pi, 9)
+        blocks = []
+        for lo, hi, rho in ((R_MIN, self.SPLIT, 0.0), (self.SPLIT, R_MAX, 1.0)):
+            r_e = np.geomspace(lo, hi, n + 1)
+            n_cells = n * (len(cth) - 1) * (len(ph) - 1)
+            blocks.append(((r_e, cth, ph),
+                           np.full((len(keys), n_cells), rho)))
+        return blocks, None
+
+
+class TestNativeBlockSeeding:
+    @staticmethod
+    def _seed(n_tracers=2000, seed=7):
+        np.random.seed(seed)
+        fh = _TwoBlockHandler(lambda r: np.ones_like(r), keys=('rho',), time=0.0)
+        return spherical_by_volume_mc(
+            r_min=R_MIN, r_max=R_MAX, n_tracers=n_tracers, start_t=0.0,
+            weight_grid='native',
+            file_handler=fh, integrator=ExplicitTrapezoid(), vel_keys=('rho',),
+        )
+
+    def test_every_tracer_lands_in_the_populated_block(self):
+        r = _radii(self._seed())
+        assert r.min() >= _TwoBlockHandler.SPLIT
+        assert r.max() <= R_MAX * (1 + 1e-12)
+
+    def test_total_mass_is_the_populated_block_only(self):
+        """rho = 1 over the outer block, so M = 4/3 pi (r_max^3 - split^3)."""
+        m = _masses(self._seed()).sum()
+        expected = 4 / 3 * np.pi * (R_MAX**3 - _TwoBlockHandler.SPLIT**3)
+        assert m == pytest.approx(expected, rel=1e-3)
