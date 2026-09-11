@@ -24,6 +24,7 @@ class ReducedSurfaceFileHandler(FileHandler):
     FileHandler implementation for reduced/transformed GR-Athena++ surface files.
     """
 
+    grid_geometry = 'spherical'
     extra_data: dict[str, Any]
 
     def __init__(

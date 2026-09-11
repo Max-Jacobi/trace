@@ -729,24 +729,46 @@ def _helper_weights(file_handler, i_loc, cells, radial: bool) -> np.ndarray:
     return dens * cells.measure()
 
 
+# The coordinates every seeder in this module works in: regions are given in
+# (r, theta, phi), tracers are placed uniformly in r**3, cos(theta) and phi, and
+# a format's native cell bounds are read as those axes. Compared against the
+# file handler's own grid_geometry before any native cell is trusted.
+GRID_GEOMETRY = 'spherical'
+
+
 def _resolve_weight_grid(file_handler, weight_grid: str) -> bool:
     """
     Whether to weight on the format's own grid.
 
-    'native' insists and lets the NotImplementedError through; 'auto' asks and
-    falls back quietly; 'helper' never asks.
+    'native' insists, and raises if the format cannot enumerate its cells or
+    describes them in other coordinates than these seeders place tracers in;
+    'auto' asks and falls back to the helper grid in either case; 'helper' never
+    asks. The helper grid is exact in any geometry, since it hands the format's
+    interpolator Cartesian points and never reads the format's cells.
     """
     if weight_grid == 'helper':
         return False
+    name = type(file_handler).__name__
     # getattr, not attribute access: handlers are duck-typed in places and need
     # not derive from FileHandler at all.
     impl = getattr(type(file_handler), 'native_cell_weights', None)
     if impl is None or impl is FileHandler.native_cell_weights:
         if weight_grid == 'native':
             raise NotImplementedError(
-                f"--weight-grid native: {type(file_handler).__name__} does not "
-                "implement native_cell_weights."
+                f"--weight-grid native: {name} does not implement native_cell_weights."
             )
+        return False
+    geometry = getattr(file_handler, 'grid_geometry', None)
+    if geometry != GRID_GEOMETRY:
+        if weight_grid == 'native':
+            raise ValueError(
+                f"--weight-grid native: {name} describes its cells in "
+                f"{geometry!r} coordinates, but the seeders place tracers in "
+                f"{GRID_GEOMETRY!r} ones, so its cell bounds would be misread. "
+                "Use --weight-grid helper, which works in any geometry."
+            )
+        print(f"{name} describes its cells in {geometry!r} coordinates, not "
+              f"{GRID_GEOMETRY!r}; weighting on the interpolated helper grid.")
         return False
     return True
 

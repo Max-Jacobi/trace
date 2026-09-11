@@ -427,6 +427,7 @@ class AthenaKFileHandler(FileHandler):
     see docs/formats/athenak.md.
     """
 
+    grid_geometry = 'spherical'
     extra_data: dict[str, Any]
 
     def __init__(

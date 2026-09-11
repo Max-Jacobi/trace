@@ -31,6 +31,11 @@ class FileHandler(ABC):
     cur_times: np.ndarray  # array of currently loaded times in shared memory
     extra_data: Any = None # opaque object for storing extra data if needed in parsing/loading/interpolation
     interpolators: list[InterpolatorBase]  # list of interpolator callables for currently loaded data
+    # Coordinates this format's own cells are described in, i.e. how the axes
+    # of native_cell_weights' bounds are to be read. A seeder that reads those
+    # bounds compares it against its own before trusting them. None means the
+    # format does not say, which no seeder will accept for its native cells.
+    grid_geometry: str | None = None
 
     def __init__(
         self,
@@ -245,12 +250,16 @@ class FileHandler(ABC):
             When None, return volume cells. Otherwise return only the cells
             covering that sphere, with two axes instead of three.
 
+        The axes are those of :attr:`grid_geometry`, which a format
+        implementing this must set. Every seeder in :mod:`src.seeds` works in
+        ``'spherical'`` and refuses native cells declared in anything else.
+
         Returns
         -------
         lo, hi : ndarray, shape (D, n_cells)
-            Lower and upper bound of every cell along every axis:
-            ``(r, cos(theta), phi)`` for a volume, ``(cos(theta), phi)`` on a
-            surface. ``lo <= hi`` elementwise, whichever way the format's own
+            Lower and upper bound of every cell along every axis. For a
+            ``'spherical'`` geometry: ``(r, cos(theta), phi)`` for a volume,
+            ``(cos(theta), phi)`` on a surface. ``lo <= hi`` elementwise, whichever way the format's own
             axes run -- AthenaK's equal-solid-angle ``cos(theta)`` descends
             where GR-Athena++'s ascends, and sorting the pair here spares every
             caller the special case.

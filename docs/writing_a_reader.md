@@ -240,7 +240,13 @@ per sampled snapshot, and it puts an interpolation error and a midpoint rule
 between the data and the weights.
 
 `native_cell_weights(slot, surface_radius=None)` hands the seeder those cells
-instead. Return `lo, hi, weights, r_used`, where `lo` and `hi` are
+instead. Declare the coordinates they are in with a class attribute,
+`grid_geometry = 'spherical'` for all three shipped formats. The seeders
+compare it against their own (`src.seeds.GRID_GEOMETRY`) before reading a
+single bound: `--weight-grid native` refuses a mismatch, and `auto` falls back
+to the helper grid, which is exact in any geometry because it only ever hands
+your interpolator Cartesian points. The base class declares `None`, so a
+format that forgets is refused rather than misread. Return `lo, hi, weights, r_used`, where `lo` and `hi` are
 `(D, n_cells)`: the lower and upper bound of every cell along every axis,
 `(r, cos_theta, phi)` for a volume and `(cos_theta, phi)` for a single shell.
 

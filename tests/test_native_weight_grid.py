@@ -19,8 +19,20 @@ class _NoHook:
 
 
 class _WithHook:
+    grid_geometry = 'spherical'
+
     def native_cell_weights(self, slot, surface_radius=None):
         raise AssertionError("not called in these tests")
+
+
+class _CartesianHook(_WithHook):
+    """A format with native cells, but in coordinates the seeders do not use."""
+    grid_geometry = 'cartesian'
+
+
+class _UndeclaredHook(_WithHook):
+    """A format that implements the hook but never says what its axes are."""
+    grid_geometry = None
 
 
 class TestWeightGridResolution:
@@ -60,12 +72,55 @@ class TestWeightGridResolution:
         assert _resolve_weight_grid(_Bare.__new__(_Bare), 'auto') is False
 
 
+class TestGridGeometry:
+    """
+    The seeders read a format's native cell bounds as (r, cos theta, phi). A
+    format whose cells are in anything else would have its x read as r and so
+    on -- every mass and position wrong, and nothing downstream would notice.
+    The declared geometries have to agree before any native cell is used.
+    """
+
+    def test_every_shipped_format_declares_spherical(self):
+        from src.athdf_spherical import SphericalAthdfFileHandler
+        from src.athenak import AthenaKFileHandler
+        from src.reduced_surface import ReducedSurfaceFileHandler
+        from src.seeds import GRID_GEOMETRY
+        for cls in (ReducedSurfaceFileHandler, AthenaKFileHandler,
+                    SphericalAthdfFileHandler):
+            assert cls.grid_geometry == GRID_GEOMETRY
+
+    def test_native_refuses_a_mismatch(self):
+        with pytest.raises(ValueError, match="'cartesian' coordinates"):
+            _resolve_weight_grid(_CartesianHook(), 'native')
+
+    def test_native_refuses_an_undeclared_geometry(self):
+        """Not saying is not the same as saying 'spherical'."""
+        with pytest.raises(ValueError, match="None coordinates"):
+            _resolve_weight_grid(_UndeclaredHook(), 'native')
+
+    def test_auto_falls_back_to_the_helper_grid(self, capsys):
+        """
+        The helper grid never reads the format's cells, so it is exact in any
+        geometry: 'auto' has a correct route to take and says it took it.
+        """
+        assert _resolve_weight_grid(_CartesianHook(), 'auto') is False
+        assert "helper grid" in capsys.readouterr().out
+
+    def test_helper_does_not_look(self):
+        assert _resolve_weight_grid(_CartesianHook(), 'helper') is False
+
+    def test_the_base_class_declares_nothing(self):
+        assert FileHandler.grid_geometry is None
+
+
 class _Bounds:
     """
     A handler whose cells are handed over one by one, as the contract asks:
     bounds and a mass each, with no field values and no say for the caller in
     what "mass" means.
     """
+
+    grid_geometry = 'spherical'
 
     def __init__(self, lo, hi, weights=None, r_used=None):
         self.lo, self.hi = np.asarray(lo, float), np.asarray(hi, float)

@@ -279,6 +279,7 @@ class _SplitShellHandler(MockFileHandler):
     """
 
     SPLIT = 400.0
+    grid_geometry = 'spherical'
 
     def native_cell_weights(self, slot, surface_radius=None):
         n = 8

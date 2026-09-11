@@ -192,6 +192,7 @@ class SphericalAthdfFileHandler(FileHandler):
     loaded step is checked against it (regridding between outputs raises).
     """
 
+    grid_geometry = 'spherical'
     extra_data: dict[str, Any]
 
     def __init__(
