@@ -10,6 +10,7 @@ reader against a real AthenaK dump if one is present at
 import os
 
 import numpy as np
+from src.utils import densitization_factor
 import pytest
 
 from src.athenak import (
@@ -734,100 +735,173 @@ class TestNativeCellWeights:
     """
     The native weight grid for the mass-weighted seeding modes.
 
-    The thing worth checking is that the cells *tile* the sphere: whatever
-    convention the polar axis is in, and whether or not its samples sit on
-    the poles, the cell measures have to sum to the full solid angle. If they
-    do not, every sampled mass is wrong by the same factor and nothing
+    Two things have to hold. The cells must *tile* the sphere: whatever
+    convention the polar axis is in, and whether or not its samples sit on the
+    poles, the measures have to sum to the full solid angle. And the weight
+    handed back must be the cell's mass, built from the handler's own
+    MassDensity rather than from a raw field the caller then reinterprets. If
+    either is wrong, every sampled mass is off by the same factor and nothing
     downstream would notice.
     """
 
+    VEL = ("V_u_x", "V_u_y", "V_u_z")
+
     @staticmethod
-    def _loaded(tmp_path, convention):
-        make_dataset(tmp_path, times=[0.0, 10.0], keys=("dens",),
-                     convention=convention)
-        fh = TestFileHandler._handler(None, tmp_path, ["rho"])
+    def _loaded(tmp_path, convention, with_velocity=False):
+        raw = ("dens",) + (("win_Vx", "win_Vy", "win_Vz") if with_velocity else ())
+        keys = ["rho"] + (list(TestNativeCellWeights.VEL) if with_velocity else [])
+        make_dataset(tmp_path, times=[0.0, 10.0], keys=raw, convention=convention)
+        extra = {"vel_keys": TestNativeCellWeights.VEL} if with_velocity else {}
+        fh = TestFileHandler._handler(None, tmp_path, keys, **extra)
         fh.load_chunk(0, forward=True)
         return fh
 
+    @staticmethod
+    def _at_nodes(fh, keys, i_r=None):
+        """The requested keys at every grid node, via the interpolator."""
+        ng = fh.n_ghosts
+        r = np.asarray(fh.extra_data['r'], dtype=float)
+        nodes = np.asarray(fh.extra_data['polar_nodes'], dtype=float)[ng:-ng]
+        ph = np.asarray(fh.extra_data['ph'], dtype=float)[ng:-ng]
+        th = (np.arccos(np.clip(nodes, -1.0, 1.0))
+              if fh.extra_data['polar'] == 'mu' else nodes)
+        r_sel = r if i_r is None else r[i_r:i_r + 1]
+        rg, tg, pg = np.meshgrid(r_sel, th, ph, indexing='ij')
+        pos = np.array([(rg * np.sin(tg) * np.cos(pg)).ravel(),
+                        (rg * np.sin(tg) * np.sin(pg)).ravel(),
+                        (rg * np.cos(tg)).ravel()])
+        interp = type(fh).setup_interpolator(
+            {k: fh.shared_memory[0][k] for k in keys}, fh.extra_data)
+        interp.load()
+        try:
+            return interp(pos), pos
+        finally:
+            interp.unload()
+
     @pytest.mark.parametrize("convention", ["mu_node", "theta_cell"])
-    def test_edges_tile_the_full_solid_angle(self, tmp_path, convention):
+    def test_cells_tile_the_full_solid_angle(self, tmp_path, convention):
         fh = self._loaded(tmp_path, convention)
         try:
-            lo, hi, vals, r_used = fh.native_cell_weights(0, ("rho",))
+            lo, hi, w, r_used = fh.native_cell_weights(0)
             assert r_used is None
-            assert lo.shape == hi.shape == (3, vals.shape[1])
+            assert lo.shape == hi.shape == (3, w.size)
             assert np.all(hi >= lo)
-            # The cells fill the shell exactly once, so their volumes sum to it.
             r = np.asarray(fh.extra_data['r'])
-            vol = ((hi[0] ** 3 - lo[0] ** 3) / 3 * (hi[1] - lo[1]) * (hi[2] - lo[2]))
-            r_in, r_out = lo[0].min(), hi[0].max()
-            exact = 4 * np.pi * (r_out ** 3 - r_in ** 3) / 3
-            assert vol.sum() == pytest.approx(exact, rel=1e-12)
-            assert vals.shape[1] == len(r) * (lo.shape[1] // len(r))
+            n_ang = w.size // len(r)
+            # one radial shell's worth of cells covers the whole sphere
+            solid = ((hi[1] - lo[1]) * (hi[2] - lo[2]))[:n_ang].sum()
+            assert solid == pytest.approx(4 * np.pi, rel=1e-12)
         finally:
             fh.free_shared_memory()
 
     @pytest.mark.parametrize("convention", ["mu_node", "theta_cell"])
-    def test_cos_theta_edges_span_the_poles_and_stay_monotone(self, tmp_path, convention):
+    def test_cos_theta_bounds_reach_both_poles(self, tmp_path, convention):
         """
         Clipping to [-1, 1] is what makes a node-centred axis work: its first
         and last samples sit *on* the poles and so own only half a cell.
         """
         fh = self._loaded(tmp_path, convention)
         try:
-            lo, hi, _, _ = fh.native_cell_weights(0, ("rho",))
+            lo, hi, _, _ = fh.native_cell_weights(0)
             assert lo[1].min() == pytest.approx(-1.0)
             assert hi[1].max() == pytest.approx(1.0)
-            # solid angle over one radial shell's worth of cells is 4 pi
-            n_ang = lo.shape[1] // len(np.asarray(fh.extra_data['r']))
-            solid = ((hi[1] - lo[1]) * (hi[2] - lo[2]))[:n_ang].sum()
-            assert solid == pytest.approx(4 * np.pi, rel=1e-12)
         finally:
             fh.free_shared_memory()
 
     def test_surface_radius_snaps_to_a_shell(self, tmp_path):
-        fh = self._loaded(tmp_path, "mu_node")
+        fh = self._loaded(tmp_path, "mu_node", with_velocity=True)
         try:
             r = np.asarray(fh.extra_data['r'])
             target = float(r[3]) * 1.01          # deliberately off-grid
-            lo, hi, vals, r_used = fh.native_cell_weights(0, ("rho",),
-                                                          surface_radius=target)
+            lo, hi, w, r_used = fh.native_cell_weights(0, surface_radius=target)
             assert r_used == pytest.approx(float(r[3]))
-            assert lo.shape == hi.shape == (2, vals.shape[1])   # (cos theta, phi)
+            assert lo.shape == hi.shape == (2, w.size)   # (cos theta, phi)
             solid = ((hi[0] - lo[0]) * (hi[1] - lo[1])).sum()
             assert solid == pytest.approx(4 * np.pi, rel=1e-12)
         finally:
             fh.free_shared_memory()
 
-    def test_values_match_the_interpolator_at_a_cell_centre(self, tmp_path):
+    @staticmethod
+    def _comparable(fh, got, want):
         """
-        The point of going native is skipping the interpolator, so the two
-        must agree where they overlap -- PCHIP reproduces its nodes exactly.
+        The two arrays restricted to where they can be compared at all.
+
+        Two carve-outs, neither of them about the hook. On a node-centred polar
+        axis every phi at the pole is the same Cartesian point, so the
+        interpolator cannot reproduce a phi-dependent sample there however
+        right the handler is. And the interpolator returns NaN where a query
+        falls outside its support. Everywhere else the two must agree exactly.
         """
-        fh = self._loaded(tmp_path, "theta_cell")
+        ng = fh.n_ghosts
+        n_th = len(np.asarray(fh.extra_data['polar_nodes'])) - 2 * ng
+        n_ph = len(np.asarray(fh.extra_data['ph'])) - 2 * ng
+        cut = (slice(None), slice(1, -1), slice(None))
+        got = got.reshape(-1, n_th, n_ph)[cut].ravel()
+        want = want.reshape(-1, n_th, n_ph)[cut].ravel()
+        ok = np.isfinite(want) & np.isfinite(got)
+        assert ok.sum() > 0.5 * ok.size, "too little left to compare"
+        return got[ok], want[ok]
+
+    @pytest.mark.parametrize("convention", ["mu_node", "theta_cell"])
+    def test_weight_is_the_cell_mass(self, tmp_path, convention):
+        """
+        The point of going native is skipping the interpolator, so the weight
+        must equal density-at-the-node times cell volume -- PCHIP reproduces
+        its own nodes, so the two routes have to agree exactly.
+        """
+        fh = self._loaded(tmp_path, convention)
         try:
-            _, _, vals, _ = fh.native_cell_weights(0, ("rho",))
-            n_c = len(np.asarray(fh.extra_data['polar_nodes'])) - 2 * fh.n_ghosts
-            n_p = len(np.asarray(fh.extra_data['ph'])) - 2 * fh.n_ghosts
-            i_r, i_c, i_p = 5, 4, 3
-            # The node, not the midpoint of the cell: a cell-centred theta grid
-            # puts its sample at the middle in theta, which is not the middle
-            # in cos(theta), and the native value belongs to the sample.
-            ng = fh.n_ghosts
-            r_c = np.asarray(fh.extra_data['r'])[i_r]
-            th_c = float(np.asarray(fh.extra_data['polar_nodes'])[ng + i_c])
-            ph_c = float(np.asarray(fh.extra_data['ph'])[ng + i_p])
-            pos = np.array([[r_c * np.sin(th_c) * np.cos(ph_c)],
-                            [r_c * np.sin(th_c) * np.sin(ph_c)],
-                            [r_c * np.cos(th_c)]])
-            interp = type(fh).setup_interpolator(
-                {"rho": fh.shared_memory[0]["rho"]}, fh.extra_data)
-            interp.load()
-            try:
-                want = float(interp(pos)[0][0])
-            finally:
-                interp.unload()
-            got = vals[0].reshape(-1, n_c, n_p)[i_r, i_c, i_p]
-            assert got == pytest.approx(want, rel=1e-6)
+            lo, hi, w, _ = fh.native_cell_weights(0)
+            rho, _ = self._at_nodes(fh, ("rho",))
+            dV = (hi[0]**3 - lo[0]**3) / 3 * (hi[1] - lo[1]) * (hi[2] - lo[2])
+            np.testing.assert_allclose(*self._comparable(fh, w, rho[0] * dV),
+                                       rtol=1e-6)
+        finally:
+            fh.free_shared_memory()
+
+    def test_an_adm_mass_switches_the_weight_to_the_conserved_density(self, tmp_path):
+        """
+        With an ADM mass the handler weights on D = rho*W*sqrt(gamma) instead
+        of rho, and nothing outside it is told: the seeders call the same hook
+        either way. The ratio of the two weights must be exactly the
+        densitization factor at each cell.
+        """
+        make_dataset(tmp_path, times=[0.0, 10.0], keys=("dens", "u_t"),
+                     convention="mu_node")
+        plain = TestFileHandler._handler(None, tmp_path, ["rho", "u_t"])
+        dens = TestFileHandler._handler(None, tmp_path, ["rho", "u_t"],
+                                        adm_mass=2.7)
+        try:
+            plain.load_chunk(0, forward=True)
+            dens.load_chunk(0, forward=True)
+            lo, hi, w_plain, _ = plain.native_cell_weights(0)
+            _, _, w_dens, _ = dens.native_cell_weights(0)
+            u_t, _ = self._at_nodes(plain, ("u_t",))
+            want = w_plain * densitization_factor(
+                (lo[0] + hi[0]) / 2, u_t[0], 2.7)
+            np.testing.assert_allclose(*self._comparable(plain, w_dens, want),
+                                       rtol=1e-6)
+        finally:
+            plain.free_shared_memory()
+            dens.free_shared_memory()
+
+    def test_surface_weight_is_the_radial_mass_flux(self, tmp_path):
+        """
+        A surface cell's weight is mass per unit time, so it carries the sign
+        of v_r. Checked against the interpolator at the shell's own nodes.
+        """
+        fh = self._loaded(tmp_path, "mu_node", with_velocity=True)
+        try:
+            r = np.asarray(fh.extra_data['r'])
+            i_r = 3
+            lo, hi, w, r_used = fh.native_cell_weights(
+                0, surface_radius=float(r[i_r]))
+            vals, pos = self._at_nodes(fh, ("rho", *self.VEL), i_r=i_r)
+            v_r = sum(pos[i] * vals[1 + i] for i in range(3)) \
+                / np.linalg.norm(pos, axis=0)
+            dA = r_used**2 * (hi[0] - lo[0]) * (hi[1] - lo[1])
+            np.testing.assert_allclose(
+                *self._comparable(fh, w, vals[0] * v_r * dA), rtol=1e-6)
+            assert np.any(w < 0) and np.any(w > 0)
         finally:
             fh.free_shared_memory()

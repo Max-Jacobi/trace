@@ -239,18 +239,32 @@ already has a grid, that is a waste twice over: it costs an interpolator build
 per sampled snapshot, and it puts an interpolation error and a midpoint rule
 between the data and the weights.
 
-`native_cell_weights(slot, keys, surface_radius=None)` hands the seeder those
-cells instead. Return `lo, hi, values, r_used`, where `lo` and `hi` are
+`native_cell_weights(slot, surface_radius=None)` hands the seeder those cells
+instead. Return `lo, hi, weights, r_used`, where `lo` and `hi` are
 `(D, n_cells)`: the lower and upper bound of every cell along every axis,
 `(r, cos_theta, phi)` for a volume and `(cos_theta, phi)` for a single shell.
-`values` is `(len(keys), n_cells)` in the same cell order.
 
 Bounds rather than centres, because the caller has to size each cell and place
 a tracer inside it. Nothing about the arrangement comes back, so the seeder
 never learns whether it got one grid, a thousand meshblocks, or a refinement
 hierarchy, and there is only one code path downstream.
 
-If your format does keep a separable grid, the whole implementation is
+`weights` is `(n_cells,)` and is a **mass**, not a field value: the mass the
+cell holds, or -- when `surface_radius` is given -- the mass crossing it per
+unit time, signed so an inflowing cell is negative. Read the fields your own
+`self.mass_density.density_keys` asks for (`flux_keys` for a surface) out of
+shared memory and hand them to `self.cell_weights_from_values(lo, hi, values,
+surface_radius)`, which measures the cells and applies the density for you.
+
+That indirection is the point. Whether a mass here means `rho` or the
+conserved `D = rho*W*sqrt(gamma)` depends on the data's spacetime and
+coordinates, so it is answered by `FileHandler.build_mass_density` -- your
+class -- and not by a seeder or a CLI flag. The default suits a GR run on a
+spherical grid outside the remnant, which is every format shipped here.
+Override it if yours is Newtonian, is in different coordinates, or dumps a
+metric worth using instead of the analytic one. See [`src/mass.py`](../src/mass.py).
+
+If your format keeps a separable grid, the bounds are one call to
 `src.utils.tensor_cell_bounds(*edges)`, which turns per-axis faces into that
 pair. A block-structured format calls it once per block and concatenates, in
 the same order the values are concatenated.

@@ -17,7 +17,8 @@ from functools import reduce
 import numpy as np
 from tqdm import tqdm
 
-from .utils import do_parallel_star
+from .utils import do_parallel_star, cell_centres, cell_measure
+from .mass import MassDensity
 from .interpolators.base import InterpolatorBase
 
 
@@ -43,8 +44,24 @@ class FileHandler(ABC):
         out_file: TextIO = sys.stdout,
         interpolator_kwargs: dict[str, Any] = {},
         positive_keys: list[str] | None = None,
+        density_key: str = 'rho',
+        vel_keys: tuple[str, ...] = (),
+        adm_mass: float | None = None,
+        ut_key: str = 'u_t',
         ) -> None:
         self.keys = keys
+        # What this format's fields mean as a mass density. Owned here rather
+        # than by the seeders, because the answer depends on the data's
+        # spacetime and coordinates, not on how tracers are placed.
+        self._mass_density = self.build_mass_density(
+            density_key=density_key, vel_keys=tuple(vel_keys),
+            adm_mass=adm_mass, ut_key=ut_key)
+        # Checked on first use rather than here: a handler opened just to read
+        # fields does not need a density, and should not have to name one.
+        # Seeding touches this before any integration starts, so the error
+        # still arrives long before a run has spent anything.
+        self._mass_keys_missing = [
+            k for k in self._mass_density.flux_keys if k not in keys]
         # Fields that cannot physically be negative, floored at 0 after every
         # load. Entries not among `keys` are ignored rather than rejected, so
         # a caller can pass one standard list whatever the format supplies.
@@ -123,21 +140,82 @@ class FileHandler(ABC):
         """
         pass
 
+    @property
+    def mass_density(self) -> MassDensity:
+        """
+        What this format's fields mean as a mass density -- see :mod:`src.mass`.
+
+        Every seeder and the output writer go through this, so the rho-vs-D
+        decision is made once, here, by the side that knows the data.
+        """
+        if self._mass_keys_missing:
+            raise ValueError(
+                f"{type(self).__name__}: the mass density needs "
+                f"{self._mass_keys_missing}, which are not among the loaded "
+                f"keys {self.keys}. Add them to --keys, or drop whatever asked "
+                "for them (--adm-mass needs --ut-key)."
+            )
+        return self._mass_density
+
+    def build_mass_density(
+        self,
+        density_key: str,
+        vel_keys: tuple[str, ...],
+        adm_mass: float | None,
+        ut_key: str,
+        ) -> MassDensity:
+        """
+        How this format's fields become a mass density.
+
+        The default is the conserved ``D = rho*W*sqrt(gamma)`` when an ADM mass
+        is given and plain ``rho`` otherwise, which is right for every format
+        shipped here: all three are GR runs on a spherical grid outside the
+        remnant. Override it in a format that needs something else -- a
+        Newtonian run (return a ``MassDensity`` with ``adm_mass=None`` whatever
+        was asked for), a different spacetime, or one that dumps its own
+        ``sqrt(gamma)`` and ``W`` and should use those instead of the analytic
+        stand-in. See :mod:`src.mass`.
+        """
+        return MassDensity(density_key, vel_keys, adm_mass=adm_mass, ut_key=ut_key)
+
+    def cell_weights_from_values(
+        self,
+        lo: np.ndarray,
+        hi: np.ndarray,
+        values: np.ndarray,
+        surface_radius: float | None,
+        ) -> np.ndarray:
+        """
+        The sampling weight of every cell, from the fields on them.
+
+        Shared by every format implementing :meth:`native_cell_weights`, which
+        is why it lives here: a format supplies its cells and the values on
+        them, and this turns them into the mass each cell holds, or -- on a
+        surface -- the mass crossing it per unit time.
+
+        `values` follows ``self.mass_density.density_keys``, or ``flux_keys``
+        when `surface_radius` is given.
+        """
+        pos = cell_centres(lo, hi, surface_radius)
+        measure = cell_measure(lo, hi, surface_radius)
+        if surface_radius is None:
+            return self.mass_density.density(values, pos) * measure
+        return self.mass_density.radial_flux(values, pos) * measure
+
     def native_cell_weights(
         self,
         slot: int,
-        keys: tuple[str, ...],
         surface_radius: float | None = None,
         ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
-        The format's **own** cells, as coordinate bounds plus the values on them.
+        The format's **own** cells, as coordinate bounds plus a weight each.
 
         Optional. Implement it if the format can say where its cells are and
-        what is in them, so mass-weighted seeding samples the data as written
-        instead of interpolating it onto a helper grid first. That removes the
-        interpolation error and the midpoint rule, and is *cheaper* -- the
-        helper route's cost is dominated by building an interpolator per
-        sampled snapshot, not by evaluating it.
+        how much mass is in them, so mass-weighted seeding samples the data as
+        written instead of interpolating it onto a helper grid first. That
+        removes the interpolation error and the midpoint rule, and is
+        *cheaper* -- the helper route's cost is dominated by building an
+        interpolator per sampled snapshot, not by evaluating it.
 
         Cells are described one at a time, by a lower and an upper bound along
         each axis, and nothing about how they are arranged comes back. One
@@ -151,13 +229,18 @@ class FileHandler(ABC):
         overlapping** -- otherwise the sampled mass is double counted where
         they do -- and that ghost cells are excluded.
 
+        What comes back is a *mass*, not a field value. Read
+        ``self.mass_density.density_keys`` (or ``flux_keys`` for a surface) out
+        of shared memory and hand them to :meth:`cell_weights_from_values`,
+        which does the rest. Nothing outside this class then has to know
+        whether the right density here is ``rho``, the conserved ``D``, or
+        something only this format can work out.
+
         Parameters
         ----------
         slot : int
             Shared-memory slot holding the snapshot to read, i.e. an index into
             ``self.shared_memory`` alongside ``cur_times``.
-        keys : tuple of str
-            Fields to return values for; must be among ``self.keys``.
         surface_radius : float or None
             When None, return volume cells. Otherwise return only the cells
             covering that sphere, with two axes instead of three.
@@ -171,10 +254,12 @@ class FileHandler(ABC):
             axes run -- AthenaK's equal-solid-angle ``cos(theta)`` descends
             where GR-Athena++'s ascends, and sorting the pair here spares every
             caller the special case.
-        values : ndarray, shape (len(keys), n_cells)
-            The fields on those cells, in the same cell order.
+        weights : ndarray, shape (n_cells,)
+            The mass each cell holds, or -- when `surface_radius` is given --
+            the mass crossing it per unit time, signed so that an inflowing
+            cell is negative.
         r_used : float or None
-            The radius the cells actually sit at, when ``surface_radius`` was
+            The radius the cells actually sit at, when `surface_radius` was
             given and the format snapped it to its own grid. None means it did
             not snap and the requested radius still applies.
 

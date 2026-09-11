@@ -8,6 +8,7 @@ sum is compared to the closed-form surface integral.
 
 import sys
 import numpy as np
+from src.mass import MassDensity
 import pytest
 
 from src.seeds import spherical_surface_by_area
@@ -23,8 +24,8 @@ class _MockSurfaceInterpolator:
     Analytic interpolator that returns (rho, v_r) at Cartesian coordinates
     without touching shared memory.
 
-    The keys list must match the order used by spherical_surface_by_area:
-    vel_keys first, then density_key -- i.e. ('vx', 'vy', 'vz', 'rho').
+    The keys list is whatever the caller asked for, in that order; the real
+    handlers key off the shared-memory dict the same way.
 
     The radial velocity vr_fn(r) is decomposed into Cartesian components
     proportional to (x, y, z)/r so that dot(v, r_hat) = vr_fn(r).
@@ -78,11 +79,14 @@ class MockSurfaceFileHandler:
 
     n_files_per_step = 1
 
-    def __init__(self, rho_fn, vr_fn, times):
+    def __init__(self, rho_fn, vr_fn, times, adm_mass=None):
         self.times = np.asarray(times, dtype=float)
         self._rho_fn = rho_fn
         self._vr_fn = vr_fn
         self.keys = ['vx', 'vy', 'vz', 'rho']
+        # As in MockFileHandler: the handler owns what the mass density is.
+        self.mass_density = MassDensity('rho', ('vx', 'vy', 'vz'),
+                                        adm_mass=adm_mass)
         self.extra_data = {
             'rho_fn': rho_fn,
             'vr_fn': vr_fn,
@@ -141,7 +145,11 @@ class MockSurfaceFileHandler:
         return _MockSurfaceInterpolator(
             extra_data['rho_fn'],
             extra_data['vr_fn'],
-            extra_data['keys'],
+            # The keys actually asked for, in the order asked for. The callers
+            # index the result positionally against their own key tuple, so a
+            # mock that always returned all four in its own order would line
+            # up only by luck.
+            list(shm.keys()),
         )
 
 
@@ -209,7 +217,6 @@ class TestSphericalSurfaceByArea:
             file_handler=fh,
             vel_keys=['vx', 'vy', 'vz'],
             integrator=ExplicitTrapezoid(),
-            density_key='rho',
         )
         kwargs.update(overrides)
         return spherical_surface_by_area(**kwargs)
@@ -341,7 +348,6 @@ class TestSphericalSurfaceByArea:
             n_th=self.N_TH, n_ph=self.N_PH, n_quad=self.N_QUAD,
             random_shift_in_cell=False, file_handler=fh,
             vel_keys=['vx', 'vy', 'vz'], integrator=ExplicitTrapezoid(),
-            density_key='rho',
         )
         full = spherical_surface_by_area(phi_min=0.0, phi_max=2 * np.pi, **common)
         half = spherical_surface_by_area(phi_min=0.0, phi_max=np.pi, **common)
@@ -391,7 +397,6 @@ class TestSphericalSurfaceByArea:
             n_th=self.N_TH, n_ph=self.N_PH, n_quad=self.N_QUAD,
             random_shift_in_cell=False, file_handler=fh,
             vel_keys=['vx', 'vy', 'vz'], integrator=ExplicitTrapezoid(),
-            density_key='rho',
         )
         north = spherical_surface_by_area(theta_min=0.0,      theta_max=np.pi / 2, **common)
         south = spherical_surface_by_area(theta_min=np.pi / 2, theta_max=np.pi,    **common)
@@ -425,14 +430,12 @@ class TestSphericalSurfaceByArea:
             n_th=self.N_TH, n_ph=self.N_PH, n_quad=self.N_QUAD,
             random_shift_in_cell=False, file_handler=fh_1,
             vel_keys=['vx', 'vy', 'vz'], integrator=ExplicitTrapezoid(),
-            density_key='rho',
         )
         t2 = spherical_surface_by_area(
             r_surf=self.R_SURF, t_start=t_start_2,
             n_th=self.N_TH, n_ph=self.N_PH, n_quad=self.N_QUAD,
             random_shift_in_cell=False, file_handler=fh_2,
             vel_keys=['vx', 'vy', 'vz'], integrator=ExplicitTrapezoid(),
-            density_key='rho',
         )
         np.testing.assert_allclose(
             self._total_mass(t2), 2 * self._total_mass(t1), rtol=1e-8,

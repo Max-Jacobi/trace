@@ -7,7 +7,8 @@ from multiprocessing import Pool
 from .tracers import Tracers
 from .integrators import IntegratorBase
 from .file import FileHandler
-from .utils import do_parallel_star_pool, densitization_factor, tensor_cell_bounds
+from .utils import (do_parallel_star_pool, tensor_cell_bounds,
+                    cell_centres, cell_measure, sph_to_cart)
 
 
 # ---------------------------------------------------------------------------
@@ -16,20 +17,18 @@ from .utils import do_parallel_star_pool, densitization_factor, tensor_cell_boun
 
 _smass_setup_interp_fn = None
 _smass_extra_data      = None
-_smass_d_idx:    int   = 0
-_smass_v_indices: tuple = ()
-_smass_r_surf:   float = 1.0
+_smass_mass_density    = None
 
 
-def _init_mass_worker(setup_interp_fn, extra_data, d_idx, v_indices, r_surf):
+def _init_mass_worker(setup_interp_fn, extra_data, mass_density):
     """Pool initializer: store constants in worker globals to avoid per-task pickling."""
-    global _smass_setup_interp_fn, _smass_extra_data
-    global _smass_d_idx, _smass_v_indices, _smass_r_surf
+    global _smass_setup_interp_fn, _smass_extra_data, _smass_mass_density
     _smass_setup_interp_fn = setup_interp_fn
     _smass_extra_data      = extra_data
-    _smass_d_idx           = d_idx
-    _smass_v_indices       = v_indices
-    _smass_r_surf          = r_surf
+    # The format's own answer to what the mass density is. It is plain data and
+    # pickles, so the decision travels into the workers rather than being
+    # reconstructed from key indices here.
+    _smass_mass_density    = mass_density
 
 
 def _mass_flux_bundle(
@@ -39,24 +38,18 @@ def _mass_flux_bundle(
     shm_needed: dict,
 ) -> tuple:
     """
-    Evaluate rho*v_r at all quadrature points for a bundle of tracers and return
-    the surface-integrated dm for each tracer in the bundle.
+    Evaluate the radial mass flux at all quadrature points for a bundle of
+    tracers and return the surface-integrated dm for each tracer in the bundle.
 
     Pickled per task: pos_q_flat, w_q, shm_needed (string dict).
-    Passed via worker globals: setup_interp_fn, extra_data, key indices, r_surf.
+    Passed via worker globals: setup_interp_fn, extra_data, mass_density.
     """
     interp = _smass_setup_interp_fn(shm_needed, _smass_extra_data)
     interp.load()
     try:
         vals = interp(pos_q_flat)          # (n_keys, n_q2 * n_tr_bundle)
-        n_q2, n_tr = w_q.shape
-        pos_q = pos_q_flat.reshape(3, n_q2, n_tr)
-        rho = vals[_smass_d_idx      ].reshape(n_q2, n_tr)
-        vx  = vals[_smass_v_indices[0]].reshape(n_q2, n_tr)
-        vy  = vals[_smass_v_indices[1]].reshape(n_q2, n_tr)
-        vz  = vals[_smass_v_indices[2]].reshape(n_q2, n_tr)
-        vr  = (pos_q[0]*vx + pos_q[1]*vy + pos_q[2]*vz) / _smass_r_surf
-        return bundle_idx, np.sum(w_q * rho * vr, axis=0)
+        flux = _smass_mass_density.radial_flux(vals, pos_q_flat)
+        return bundle_idx, np.sum(w_q * flux.reshape(w_q.shape), axis=0)
     finally:
         interp.unload()
 
@@ -183,7 +176,6 @@ def spherical_by_volume(
     theta_max: float = np.pi,
     random_shift_in_cell: bool = True,
     n_quad: int = 2,
-    density_key: str = 'rho',
     **kwargs
     ) -> Tracers:
     """
@@ -197,8 +189,9 @@ def spherical_by_volume(
     ``dV ~ r**2 * dr``), which roughly cancels a homologous outflow's
     ``rho ~ r**-3`` density falloff -- giving tracers of roughly equal mass,
     not equal volume. Each tracer's actual mass is still integrated from the
-    density field directly (see ``density_key``), so this holds only
-    approximately and only for flows resembling that density profile.
+    density field directly (whichever one ``file_handler.mass_density`` says
+    that is), so this holds only approximately and only for flows resembling
+    that density profile.
 
     Parameters
     ----------
@@ -227,10 +220,9 @@ def spherical_by_volume(
     n_quad : int, optional
         Number of Gauss-Legendre quadrature points per dimension used to
         integrate density over each cell when estimating tracer mass.
-    density_key : str, optional
-        Field key for the density used in the cell-mass integral.
     **kwargs
-        Additional keyword arguments forwarded to ``Tracers``.
+        Additional keyword arguments forwarded to ``Tracers``; must include
+        ``file_handler``, whose ``mass_density`` defines the integrand.
 
     Returns
     -------
@@ -303,14 +295,17 @@ def spherical_by_volume(
         i_loc = int(np.argmin(np.abs(file_handler.cur_times - start_t)))
         shm = file_handler.shared_memory[i_loc]
         key_list = list(file_handler.keys)
-        d_idx = key_list.index(density_key)
+        # The handler decides what the mass density is; here it is integrated
+        # over each cell rather than sampled at a point.
+        md = file_handler.mass_density
+        d_idx = [key_list.index(k) for k in md.density_keys]
 
         interp = type(file_handler).setup_interpolator(shm, file_handler.extra_data)
         interp.load()
         try:
             all_pts = np.concatenate([pts for pts, _ in quads], axis=1)
             all_vals = interp(all_pts)          # (n_keys, total_quad_pts)
-            rho_all  = all_vals[d_idx]
+            rho_all  = md.density(all_vals[d_idx], all_pts)
             offset = 0
             for prop, (pts, wts) in zip(props, quads):
                 n = pts.shape[1]
@@ -337,7 +332,6 @@ def spherical_surface_by_area(
     theta_max: float = np.pi,
     random_shift_in_cell: bool = True,
     n_quad: int = 3,
-    density_key: str = 'rho',
     **kwargs
     ) -> Tracers:
     """
@@ -369,10 +363,10 @@ def spherical_surface_by_area(
     n_quad : int
         Gauss-Legendre quadrature points per angular dimension (``n_quad**2``
         total). Use ``n_quad=1`` for the single-point approximation.
-    density_key : str
-        Field key for mass density (default ``'rho'``).
     **kwargs
         Passed to ``Tracers``; must include ``file_handler`` and ``vel_keys``.
+        The handler's ``mass_density`` supplies the flux ``rho v_r``, or its
+        densitized equivalent.
 
     Returns
     -------
@@ -391,7 +385,6 @@ def spherical_surface_by_area(
     dt_g = np.abs(dt_g)
     n_t = len(t_start) - 1
 
-    vel_keys: tuple[str, ...] = kwargs['vel_keys']
     file_handler: FileHandler = kwargs['file_handler']
     _remember_verbose = file_handler.parallel_kwargs['verbose']
     file_handler.parallel_kwargs['verbose'] = False  # silence per-file load messages during mass integration
@@ -504,9 +497,7 @@ def spherical_surface_by_area(
 
     n_cpu = file_handler.parallel_kwargs["n_cpu"]
     n_bundles_per_step = max(1, 20 * n_cpu)
-    needed_keys = (*vel_keys, density_key)
-    d_idx    = needed_keys.index(density_key)
-    v_indices = tuple(needed_keys.index(vk) for vk in vel_keys)
+    needed_keys = file_handler.mass_density.flux_keys
     pbar_kwargs = {k: v for k, v in file_handler.parallel_kwargs.items() if k != "n_cpu"}
     pbar_kwargs["disable"] = not pbar_kwargs.pop('verbose', False)
 
@@ -517,9 +508,7 @@ def spherical_surface_by_area(
     init_args = (
         type(file_handler).setup_interpolator,
         file_handler.extra_data,
-        d_idx,
-        v_indices,
-        r_surf,
+        file_handler.mass_density,
     )
 
     pbar_kwargs = {k: v for k, v in file_handler.parallel_kwargs.items() if k != "n_cpu"}
@@ -606,25 +595,6 @@ def _sampling_interpolator(file_handler: FileHandler, i_loc: int, keys: tuple[st
     return type(file_handler).setup_interpolator(shm, file_handler.extra_data)
 
 
-def _conservative_density(
-    vals: np.ndarray,
-    keys: tuple[str, ...],
-    pos: np.ndarray,
-    density_key: str,
-    ut_key: str,
-    adm_mass: float | None,
-) -> np.ndarray:
-    """
-    D = sqrt(gamma) W rho at the query points, or plain rho if ``adm_mass`` is
-    None.  ``vals`` is the interpolator output for ``keys`` at ``pos``.
-    """
-    rho = vals[keys.index(density_key)]
-    if adm_mass is None:
-        return rho
-    r = np.linalg.norm(pos, axis=0)
-    return rho * densitization_factor(r, vals[keys.index(ut_key)], adm_mass)
-
-
 def _sample_cells(
     weights: np.ndarray,
     n_tracers: int,
@@ -651,14 +621,6 @@ def _sample_cells(
         )
     idx = np.random.choice(len(weights), size=n_tracers, p=abs_weights / total)
     return idx, np.sign(weights[idx]), total
-
-
-def _sph_to_cart(r, cos_theta, phi):
-    """Cartesian coordinates from (r, cos(theta), phi), any of them arrays."""
-    sin_theta = np.sqrt(np.clip(1 - np.asarray(cos_theta)**2, 0.0, None))
-    return np.array([r * sin_theta * np.cos(phi),
-                     r * sin_theta * np.sin(phi),
-                     r * cos_theta])
 
 
 class _Cells:
@@ -692,34 +654,11 @@ class _Cells:
 
     def measure(self) -> np.ndarray:
         """Cell volume, or cell area at ``r_surf``."""
-        d_ang = ((self.hi[-2] - self.lo[-2]) * (self.hi[-1] - self.lo[-1]))
-        if self.r_surf is not None:
-            return self.r_surf**2 * d_ang
-        return (self.hi[0]**3 - self.lo[0]**3) / 3 * d_ang
+        return cell_measure(self.lo, self.hi, self.r_surf)
 
     def centres(self) -> np.ndarray:
         """Cartesian cell centres, shape (3, n_cells)."""
-        # cos(theta) and phi take the midpoint of the measure dV is written in.
-        # The radial one deliberately does NOT: it is the arithmetic midpoint
-        # in r, not the midpoint of r**3.
-        #
-        # The formally consistent choice would be ((r_lo**3 + r_hi**3)/2)**(1/3),
-        # exact for constant rho. But a radial grid is geometric precisely
-        # because the ejecta falls off roughly as rho ~ r**-3, and expanding
-        # both rules about a cell of ratio 1+e against the exact ln(r_hi/r_lo):
-        #
-        #   arithmetic midpoint : e - e**2/2 + e**3/3        (the exact series)
-        #   r**3      midpoint : e - e**2/2 - 0.42 e**3
-        #
-        # so the arithmetic one is third-order accurate on that profile while
-        # the measure-consistent one is not. Measured on an analytic rho = r**-3
-        # shell (tests/test_seeds_mc.py) the r**3 midpoint comes out 0.98% low;
-        # the arithmetic one is within 0.1%. Do not "fix" this without rerunning
-        # that test.
-        r = self.r_surf if self.r_surf is not None else (self.lo[0] + self.hi[0]) / 2
-        return _sph_to_cart(r,
-                            (self.lo[-2] + self.hi[-2]) / 2,
-                            (self.lo[-1] + self.hi[-1]) / 2)
+        return cell_centres(self.lo, self.hi, self.r_surf)
 
     def sample_positions(self, idx: np.ndarray, u: np.ndarray) -> np.ndarray:
         """
@@ -732,9 +671,9 @@ class _Cells:
         else:
             # Uniform in r**3, so uniform in volume rather than in radius.
             r = (lo[0]**3 + u[0] * (hi[0]**3 - lo[0]**3)) ** (1 / 3)
-        return _sph_to_cart(r,
-                            lo[-2] + u[-2] * (hi[-2] - lo[-2]),
-                            lo[-1] + u[-1] * (hi[-1] - lo[-1]))
+        return sph_to_cart(r,
+                           lo[-2] + u[-2] * (hi[-2] - lo[-2]),
+                           lo[-1] + u[-1] * (hi[-1] - lo[-1]))
 
     def describe(self) -> str:
         return self.label or f"{self.n_cells}-cell"
@@ -747,13 +686,13 @@ def _grid_cells(*edges: np.ndarray, r_surf: float | None = None) -> _Cells:
                   label="x".join(str(len(e) - 1) for e in edges))
 
 
-def _native_cells(file_handler, slot, keys, ranges, r_surf=None):
+def _native_cells(file_handler, slot, ranges, r_surf=None):
     """
-    Ask the format for its own cells and keep those whose centre is in
-    ``ranges``, one ``(lo, hi)`` pair per axis of the returned bounds.
+    Ask the format for its own cells and their masses, and keep those whose
+    centre is in ``ranges`` -- one ``(lo, hi)`` pair per axis of the bounds.
     """
-    lo, hi, vals, r_used = file_handler.native_cell_weights(
-        slot, keys, surface_radius=r_surf)
+    lo, hi, weights, r_used = file_handler.native_cell_weights(
+        slot, surface_radius=r_surf)
     keep = np.ones(lo.shape[1], dtype=bool)
     for axis, (a, b) in enumerate(ranges):
         centre = (lo[axis] + hi[axis]) / 2
@@ -766,7 +705,28 @@ def _native_cells(file_handler, slot, keys, ranges, r_surf=None):
     # None means the format did not snap: keep the radius the caller asked for.
     cells = _Cells(lo[:, keep], hi[:, keep],
                    r_surf=r_surf if r_used is None else r_used)
-    return cells, vals[:, keep]
+    return cells, weights[keep]
+
+
+def _helper_weights(file_handler, i_loc, cells, radial: bool) -> np.ndarray:
+    """
+    The same per-cell masses, for a format with no native grid: interpolate the
+    fields its ``mass_density`` asks for onto the helper cells' centres.
+
+    The density decision still belongs to the handler here. Only the grid the
+    weights are built on differs between this and the native route.
+    """
+    md = file_handler.mass_density
+    keys = md.flux_keys if radial else md.density_keys
+    pos_c = cells.centres()
+    interp = _sampling_interpolator(file_handler, i_loc, keys)
+    interp.load()
+    try:
+        vals = interp(pos_c)
+    finally:
+        interp.unload()
+    dens = md.radial_flux(vals, pos_c) if radial else md.density(vals, pos_c)
+    return dens * cells.measure()
 
 
 def _resolve_weight_grid(file_handler, weight_grid: str) -> bool:
@@ -800,9 +760,6 @@ def spherical_by_volume_mc(
     phi_max: float = 2*np.pi,
     theta_min: float = 0.0,
     theta_max: float = np.pi,
-    density_key: str = 'rho',
-    ut_key: str = 'u_t',
-    adm_mass: float | None = None,
     cells_per_tracer: int = 8,
     weight_grid: str = 'auto',
     **kwargs
@@ -810,6 +767,11 @@ def spherical_by_volume_mc(
     """
     Seed tracers by sampling the spherical shell with the mass density as
     weight, so every tracer carries the same mass ``M_tot / n_tracers``.
+
+    What counts as the mass density is the file handler's decision, not this
+    function's: ``file_handler.mass_density`` answers it, so a run that asked
+    for the conserved ``D = rho W sqrt(gamma)`` and one that wants plain
+    ``rho`` take the same path here (see :mod:`src.mass`).
 
     A helper grid (geometric in r, equal solid angle in theta, uniform in phi)
     is laid over the shell and the density is evaluated at each cell centre.
@@ -833,15 +795,6 @@ def spherical_by_volume_mc(
         Initial time assigned to every tracer; must be a snapshot time.
     phi_min, phi_max, theta_min, theta_max : float
         Angular domain (radians).
-    density_key : str, optional
-        Field key for the rest-mass density.
-    ut_key : str, optional
-        Field key for ``u_t``, needed only when ``adm_mass`` is given.
-    adm_mass : float or None, optional
-        ADM mass (code units).  When given, the sampling weight and the total
-        mass use the conserved density ``D = sqrt(gamma) W rho`` instead of
-        ``rho`` (see ``src.utils.densitization_factor``), and the resulting
-        ``mass`` prop is the conserved rest mass per tracer.
     cells_per_tracer : int, optional
         Helper-grid cells per tracer.  Higher values resolve the density
         field better at the cost of more interpolator evaluations.
@@ -855,20 +808,18 @@ def spherical_by_volume_mc(
     """
     file_handler: FileHandler = kwargs['file_handler']
     native = _resolve_weight_grid(file_handler, weight_grid)
-    needed_keys = (density_key,) if adm_mass is None else (density_key, ut_key)
 
     i_ft = int(np.argmin(np.abs(np.asarray(file_handler.times) - start_t)))
     file_handler.load_chunk(i_ft, forward=True)
     i_loc = int(np.argmin(np.abs(file_handler.cur_times - start_t)))
 
     if native:
-        cells, vals = _native_cells(
-            file_handler, i_loc, needed_keys,
+        cells, weights = _native_cells(
+            file_handler, i_loc,
             ranges=((r_min, r_max),
                     (np.cos(theta_max), np.cos(theta_min)),
                     (phi_min, phi_max)),
         )
-        pos_c = cells.centres()
     else:
         n_r, n_th, n_ph = _auto_grid(
             cells_per_tracer * n_tracers,
@@ -879,17 +830,8 @@ def spherical_by_volume_mc(
             np.linspace(np.cos(theta_min), np.cos(theta_max), n_th + 1),
             np.linspace(phi_min, phi_max, n_ph + 1),
         )
-        pos_c = cells.centres()
-        interp = _sampling_interpolator(file_handler, i_loc, needed_keys)
-        interp.load()
-        try:
-            vals = interp(pos_c)
-        finally:
-            interp.unload()
+        weights = _helper_weights(file_handler, i_loc, cells, radial=False)
 
-    dens = _conservative_density(vals, needed_keys, pos_c, density_key, ut_key, adm_mass)
-
-    weights = dens * cells.measure()
     idx, signs, m_tot = _sample_cells(weights, n_tracers, "mass")
 
     positions = cells.sample_positions(
@@ -898,13 +840,12 @@ def spherical_by_volume_mc(
     masses = signs * (m_tot / n_tracers)
     print(f"Sampled {n_tracers} tracers of mass {m_tot/n_tracers:.4e} from a "
           f"{cells.describe()} {'native' if native else 'interpolated'} weight grid "
-          f"(total mass {masses.sum():.4e} of {np.nansum(weights):.4e} on the grid).")
+          f"(total mass {masses.sum():.4e} of {np.nansum(weights):.4e} on the grid, "
+          f"weighted by {file_handler.mass_density.describe()}).")
     return Tracers(
         positions=positions,
         times=np.full(n_tracers, start_t),
-        props=[{'mass': float(m)} if adm_mass is None
-               else {'mass': float(m), 'mass_D': float(m)}
-               for m in masses],
+        props=[{'mass': float(m)} for m in masses],
         **kwargs
     )
 
@@ -917,9 +858,6 @@ def spherical_surface_mc(
     phi_max: float = 2*np.pi,
     theta_min: float = 0.0,
     theta_max: float = np.pi,
-    density_key: str = 'rho',
-    ut_key: str = 'u_t',
-    adm_mass: float | None = None,
     cells_per_tracer: int = 8,
     weight_grid: str = 'auto',
     **kwargs
@@ -954,7 +892,7 @@ def spherical_surface_mc(
         Number of tracers to draw.
     phi_min, phi_max, theta_min, theta_max : float
         Angular domain (radians).
-    density_key, ut_key, adm_mass, cells_per_tracer
+    cells_per_tracer, weight_grid
         As in ``spherical_by_volume_mc``.
     **kwargs
         Passed to ``Tracers``; must include ``file_handler`` and ``vel_keys``.
@@ -965,7 +903,6 @@ def spherical_surface_mc(
         Tracer collection with ``n_tracers`` tracers of equal mass magnitude
         and the sign of their own flux.
     """
-    vel_keys: tuple[str, ...] = tuple(kwargs['vel_keys'])
     file_handler: FileHandler = kwargs['file_handler']
     file_times = np.asarray(file_handler.times)
 
@@ -979,20 +916,16 @@ def spherical_surface_mc(
     dt = np.abs(dt)
 
     native = _resolve_weight_grid(file_handler, weight_grid)
-    needed_keys = (*vel_keys, density_key)
-    if adm_mass is not None and ut_key not in needed_keys:
-        needed_keys += (ut_key,)
 
     ranges = ((np.cos(theta_max), np.cos(theta_min)), (phi_min, phi_max))
 
     if native:
         # The data's own cells set the angular resolution, and the format
         # decides whether r_surf needs snapping. One probe load to fix the cell
-        # layout; the values are re-read per time step below.
+        # layout; the fluxes are re-read per time step below.
         i_probe = int(np.argmin(np.abs(np.asarray(file_handler.times) - t_start[0])))
         file_handler.load_chunk(i_probe, forward=True)
-        cells, _ = _native_cells(
-            file_handler, 0, needed_keys, ranges, r_surf=r_surf)
+        cells, _ = _native_cells(file_handler, 0, ranges, r_surf=r_surf)
         if not np.isclose(cells.r_surf, r_surf, rtol=1e-3):
             print(f"--r-surf {r_surf:g} snapped to the grid shell at {cells.r_surf:g}.")
         r_surf = cells.r_surf
@@ -1007,8 +940,6 @@ def spherical_surface_mc(
             r_surf=r_surf,
         )
 
-    dA = cells.measure()
-    pos_c = cells.centres()
     n_cells = cells.n_cells
 
     weights = np.zeros((n_t, n_cells))
@@ -1027,26 +958,17 @@ def spherical_surface_mc(
                 if len(i_t) == 0:
                     continue
                 if native:
-                    _, vals = _native_cells(
-                        file_handler, i_loc, needed_keys, ranges, r_surf=r_surf)
-                    if vals.shape[1] != n_cells:
+                    _, flux = _native_cells(
+                        file_handler, i_loc, ranges, r_surf=r_surf)
+                    if flux.size != n_cells:
                         raise ValueError(
                             f"The cell layout changed between snapshots "
-                            f"({vals.shape[1]} cells against {n_cells} at the probe); "
+                            f"({flux.size} cells against {n_cells} at the probe); "
                             "a weight grid can only be built on a static mesh."
                         )
                 else:
-                    interp = _sampling_interpolator(file_handler, i_loc, needed_keys)
-                    interp.load()
-                    try:
-                        vals = interp(pos_c)
-                    finally:
-                        interp.unload()
-                dens = _conservative_density(
-                    vals, needed_keys, pos_c, density_key, ut_key, adm_mass)
-                v_r = sum(pos_c[i] * vals[needed_keys.index(vk)]
-                          for i, vk in enumerate(vel_keys)) / r_surf
-                weights[i_t[0]] = dens * v_r * dA * dt[i_t[0]]
+                    flux = _helper_weights(file_handler, i_loc, cells, radial=True)
+                weights[i_t[0]] = flux * dt[i_t[0]]
     finally:
         file_handler.parallel_kwargs['verbose'] = _remember_verbose
 
@@ -1062,12 +984,11 @@ def spherical_surface_mc(
           f"{len(np.unique(times))} unique times from a {cells.describe()} x {n_t} times "
           f"{'native' if native else 'interpolated'} weight grid "
           f"({(signs < 0).sum()} inflowing; net mass {masses.sum():.4e} of "
-          f"{np.nansum(weights):.4e} on the grid, {m_tot:.4e} crossing either way).")
+          f"{np.nansum(weights):.4e} on the grid, {m_tot:.4e} crossing either way, "
+          f"weighted by {file_handler.mass_density.describe()}).")
     return Tracers(
         positions=positions,
         times=times,
-        props=[{'mass': float(m)} if adm_mass is None
-               else {'mass': float(m), 'mass_D': float(m)}
-               for m in masses],
+        props=[{'mass': float(m)} for m in masses],
         **kwargs
     )

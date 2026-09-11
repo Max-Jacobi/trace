@@ -525,7 +525,6 @@ class AthenaKFileHandler(FileHandler):
     def native_cell_weights(
         self,
         slot: int,
-        keys: tuple[str, ...],
         surface_radius: float | None = None,
         ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
@@ -576,6 +575,8 @@ class AthenaKFileHandler(FileHandler):
             lo, hi = tensor_cell_bounds(cth_edges, ph_edges)
             r_used = float(r[j])
 
+        keys = (self.mass_density.density_keys if surface_radius is None
+                else self.mass_density.flux_keys)
         values = np.empty((len(keys), lo.shape[1]))
         for i_k, key in enumerate(keys):
             shm = SharedMemory(name=self.shared_memory[slot][key])
@@ -585,7 +586,8 @@ class AthenaKFileHandler(FileHandler):
             finally:
                 shm.close()
 
-        return lo, hi, values, r_used
+        weights = self.cell_weights_from_values(lo, hi, values, surface_radius)
+        return lo, hi, weights, r_used
 
     @staticmethod
     def load_step_to_memory(

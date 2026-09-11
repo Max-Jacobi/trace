@@ -19,7 +19,7 @@ class _NoHook:
 
 
 class _WithHook:
-    def native_cell_weights(self, slot, keys, surface_radius=None):
+    def native_cell_weights(self, slot, surface_radius=None):
         raise AssertionError("not called in these tests")
 
 
@@ -61,16 +61,20 @@ class TestWeightGridResolution:
 
 
 class _Bounds:
-    """A handler whose cells are handed over one by one, as the contract asks."""
+    """
+    A handler whose cells are handed over one by one, as the contract asks:
+    bounds and a mass each, with no field values and no say for the caller in
+    what "mass" means.
+    """
 
-    def __init__(self, lo, hi, values=None, r_used=None):
+    def __init__(self, lo, hi, weights=None, r_used=None):
         self.lo, self.hi = np.asarray(lo, float), np.asarray(hi, float)
-        self.values = (np.zeros((1, self.lo.shape[1])) if values is None
-                       else np.asarray(values, float))
+        self.weights = (np.zeros(self.lo.shape[1]) if weights is None
+                        else np.asarray(weights, float))
         self.r_used = r_used
 
-    def native_cell_weights(self, slot, keys, surface_radius=None):
-        return self.lo, self.hi, self.values, self.r_used
+    def native_cell_weights(self, slot, surface_radius=None):
+        return self.lo, self.hi, self.weights, self.r_used
 
 
 class TestRegionRestriction:
@@ -85,15 +89,15 @@ class TestRegionRestriction:
         # four radial cells [0,1] [1,2] [2,3] [3,4], one cell each in angle
         lo = np.array([[0.0, 1.0, 2.0, 3.0], [-1.0] * 4, [0.0] * 4])
         hi = np.array([[1.0, 2.0, 3.0, 4.0], [1.0] * 4, [2 * np.pi] * 4])
-        return _Bounds(lo, hi, values=np.arange(4.0)[None, :])
+        return _Bounds(lo, hi, weights=np.arange(4.0))
 
     def test_selects_cells_by_centre(self):
-        cells, vals = _native_cells(
-            self._radial_cells(), 0, ('rho',),
+        cells, weights = _native_cells(
+            self._radial_cells(), 0,
             ranges=((1.0, 3.0), (-1.0, 1.0), (0.0, 2 * np.pi)))
         assert cells.n_cells == 2
-        # centres 1.5 and 2.5, i.e. the middle two cells and their values
-        assert vals[0].tolist() == [1.0, 2.0]
+        # centres 1.5 and 2.5, i.e. the middle two cells and their masses
+        assert weights.tolist() == [1.0, 2.0]
 
     def test_handles_a_descending_axis(self):
         """
@@ -102,26 +106,26 @@ class TestRegionRestriction:
         """
         lo = np.array([[1.0] * 4, [0.5, 0.0, -0.5, -1.0], [0.0] * 4])
         hi = np.array([[2.0] * 4, [1.0, 0.5, 0.0, -0.5], [1.0] * 4])
-        cells, _ = _native_cells(_Bounds(lo, hi), 0, ('rho',),
+        cells, _ = _native_cells(_Bounds(lo, hi), 0,
                                  ranges=((1.0, 2.0), (-0.5, 0.5), (0.0, 1.0)))
         assert cells.n_cells == 2
 
     def test_an_empty_region_is_an_error_the_user_can_act_on(self):
         with pytest.raises(ValueError, match="No native cell"):
-            _native_cells(self._radial_cells(), 0, ('rho',),
+            _native_cells(self._radial_cells(), 0,
                           ranges=((10.0, 20.0), (-1.0, 1.0), (0.0, 2 * np.pi)))
 
     def test_an_unsnapped_radius_stays_the_one_that_was_asked_for(self):
         lo = np.array([[-1.0], [0.0]])
         hi = np.array([[1.0], [2 * np.pi]])
-        cells, _ = _native_cells(_Bounds(lo, hi), 0, ('rho',),
+        cells, _ = _native_cells(_Bounds(lo, hi), 0,
                                  ranges=((-1.0, 1.0), (0.0, 2 * np.pi)), r_surf=7.0)
         assert cells.r_surf == 7.0
 
     def test_a_snapped_radius_overrides_it(self):
         lo = np.array([[-1.0], [0.0]])
         hi = np.array([[1.0], [2 * np.pi]])
-        cells, _ = _native_cells(_Bounds(lo, hi, r_used=6.5), 0, ('rho',),
+        cells, _ = _native_cells(_Bounds(lo, hi, r_used=6.5), 0,
                                  ranges=((-1.0, 1.0), (0.0, 2 * np.pi)), r_surf=7.0)
         assert cells.r_surf == 6.5
 

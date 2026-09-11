@@ -35,7 +35,7 @@ checks) see [Analysis scripts](#analysis-scripts) and `analysis/README.md`.
   - [Seeding: `volume` mode](#seeding-volume-mode)
   - [Seeding: `surface` mode](#seeding-surface-mode)
   - [Seeding: `volume-mc` and `surface-mc` modes](#seeding-volume-mc-and-surface-mc-modes)
-- [Two masses: `mass` and `mass_D`](#two-masses-mass-and-mass_d)
+- [What counts as mass: `--adm-mass`](#what-counts-as-mass---adm-mass)
 - [Step 3: read the output](#step-3-read-the-output)
 - [Running on a cluster (SLURM)](#running-on-a-cluster-slurm)
 - [Choosing options: a tuning guide](#choosing-options-a-tuning-guide)
@@ -154,7 +154,7 @@ used as the integration bounds.
 | `--keys` | per `--format` | Every field loaded from the snapshots and recorded along each tracer's history. Must all exist in your snapshot files. |
 | `--vel-keys` | `V_u_x V_u_y V_u_z` | The (3 of `--keys`) fields used as the Cartesian velocity vector that actually moves the tracers. |
 | `--density-key` | `rho` | Field used as mass density when computing each tracer's represented mass (see the seeding sections below). |
-| `--adm-mass` | off | ADM mass in code units. Adds the conserved mass `mass_D` to each tracer, or, in the `-mc` modes, makes the sampling weight and the single `mass` conserved -- see [Two masses](#two-masses-mass-and-mass_d). |
+| `--adm-mass` | off | ADM mass in code units. Makes every tracer's `mass` the conserved rest mass, weighting on `D = rho*W*sqrt(gamma)` instead of `rho` -- see [What counts as mass](#what-counts-as-mass---adm-mass). |
 | `--ut-key` | `u_t` | Field key for `u_t`, from which `--adm-mass` reconstructs the Lorentz factor. Must be in `--keys` when `--adm-mass` is used. |
 
 If your data carries different or extra fields (e.g. you skipped the M1
@@ -301,10 +301,8 @@ drawing at `p ∝ |w|` and weighting by `w/p` leaves `sign(w) M_tot/N`).
 
 With `--adm-mass` the weight and the total use the conserved density
 `D = sqrt(gamma) W rho` rather than `rho`, so the `mass` written per tracer
-is already the conserved rest mass. These modes record `mass_D` alongside
-it with the same value, which is how the pipeline knows not to apply
-`W sqrt(gamma)` a second time downstream -- see
-[Two masses](#two-masses-mass-and-mass_d).
+is the conserved rest mass. That choice is the file handler's, not the
+seeder's -- see [What counts as mass](#what-counts-as-mass---adm-mass).
 
 ```bash
 # --weight-grid native is what `auto` already picks for GR-Athena++ and
@@ -352,9 +350,10 @@ Every tracer becomes one file, `<output-dir>/tracer_NNNNNN.dat`
   boundary and stopped early, `"failed"` if something went wrong writing
   its data, `"not started"` if it was never reached). `volume`-seeded
   tracers also carry `dV` (cell volume) and `mass`; `surface`-seeded
-  tracers carry `mass` (flux-integrated). With `--adm-mass`, every tracer
-  additionally carries `mass_D` -- see [Two masses](#two-masses-mass-and-mass_d);
-  the `-mc` modes are the exception, their `mass` is already the conserved one.
+  tracers carry `mass` (flux-integrated). There is exactly one mass per
+  tracer whatever the seeding mode, and `--adm-mass` changes what it is
+  rather than adding a second -- see
+  [What counts as mass](#what-counts-as-mass---adm-mass).
 - **Line 2** (`#`-prefixed): column legend -- always `time x y z` followed
   by every field in `--keys`, in order.
 - **Remaining lines**: one row per integration step, sorted by time,
@@ -376,18 +375,22 @@ tr.data["time"]      # ndarray, matching time values
 argparse-driven examples of loading many `Trajectory` objects this way and
 building plots/animations/mass budgets from them.
 
-### Two masses: `mass` and `mass_D`
+### What counts as mass: `--adm-mass`
 
-`mass` is built from `--density-key`, which for every format shipped here is
-`rho`, the rest-mass density. The conserved rest mass is not that integral
-but the integral of the densitized `D = rho*W*sqrt(gamma)`, so `mass` is
+Every tracer carries exactly one `mass`. What that mass *is* -- a rest-mass
+integral or a conserved one -- is decided by the file handler, through the
+`MassDensity` it builds (see [`src/mass.py`](src/mass.py)), and no seeder or
+output writer knows which case it is in.
+
+By default it is `--density-key`, which for every format shipped here is `rho`,
+the rest-mass density. The conserved rest mass is not that integral but the
+integral of the densitized `D = rho*W*sqrt(gamma)`, so a plain `rho` mass is
 short by `W*sqrt(gamma)`, of order a few percent for merger ejecta and rising
-with both velocity and depth in the potential. It is not a constant factor
-and cannot be divided out afterwards.
+with both velocity and depth in the potential. It is not a constant factor and
+cannot be divided out afterwards.
 
-Passing `--adm-mass M` (code units) writes a second header entry `mass_D`
-alongside it, leaving `mass` untouched. Both factors are reconstructed from
-data the tracer already carries:
+Passing `--adm-mass M` (code units) switches the handler to `D`. Both factors
+are reconstructed from data the snapshots already carry:
 
 ```
 W            = -u_t / alpha          (exact where the shift is negligible)
@@ -396,26 +399,32 @@ alpha        = (1 - M/2r) / psi
 -> D/rho     = (-u_t) * psi**7 / (1 - M/2r)
 ```
 
-evaluated at each tracer's own seed radius, which is where its cell volume was
-measured and so where its conserved parcel mass is defined. `u_t` (or whatever
-`--ut-key` names) must be in `--keys` (it is by default for `reduced_surface`).
-
-The `volume-mc` and `surface-mc` modes apply the same factor, but inside the
-seeding, at every point of the weight grid rather than once per tracer at its
-seed radius. Their sampling weight and total mass are then already the
-conserved ones, so they write a single `mass` and no `mass_D`.
+`u_t` (or whatever `--ut-key` names) must be in `--keys`; it is by default for
+`reduced_surface`. The factor is applied wherever the mass is built: at every
+cell of the weight grid in the `-mc` modes, at every quadrature point in
+`volume` and `surface`, and at the tracer's own seed radius when the mass is
+finished off at output time.
 
 Checked against a GR-Athena++ BNS merger at `r = 400 M`, where the surface
 dumps carry both `hydro.cons.D` and `hydro.aux.W`: the reconstructed
 `sqrt(gamma)` was accurate to 0.008%, the reconstructed `W` matched the dumped
 one to five decimals, and a 0.1 `M_sun` error in `--adm-mass` moves the result
-by under 0.1%. Summing `mass_D` over the tracers crossing that sphere
-reproduced the simulation's own `D*V` flux integral to better than 1%, against
-3.8% low for `mass`.
+by under 0.1%. Summing the densitized tracer masses over the tracers crossing
+that sphere reproduced the simulation's own `D*V` flux integral to better than
+1%, against 3.8% low for the plain `rho` mass.
 
 The approximation degrades close to the remnant, where the shift stops being
 negligible and the metric stops being Schwarzschild. If your snapshots carry
 `D` itself, prefer pointing `--density-key` at it and ignoring all of this.
+
+A format that needs something else entirely -- a Newtonian run, different
+coordinates, a dumped metric to use instead of the analytic one -- overrides
+`FileHandler.build_mass_density` and returns its own `MassDensity`. Nothing
+else changes: the seeders call the same hook.
+
+Trajectory files written before this consolidation carry a separate `mass_D`
+header entry alongside a rho-based `mass`. `analysis/` still prefers `mass_D`
+where it finds one, so old output keeps working.
 
 ### Where the sampling weights come from: `--weight-grid`
 
@@ -457,9 +466,11 @@ features, not a smoother `mdot`.
 
 To give a new format a native grid, implement `native_cell_weights` on its
 `FileHandler` (see [docs/writing_a_reader.md](docs/writing_a_reader.md)). It
-hands back the coordinate bounds of its cells one by one, so it is optional,
-it needs no single grid, and the only real requirement is that the cells
-**tile the region without overlapping**.
+hands back the coordinate bounds of its cells one by one, plus the mass in
+each, so it is optional, it needs no single grid, and the only real
+requirement is that the cells **tile the region without overlapping**. What a
+mass is comes from the same class, via `build_mass_density` -- see
+[What counts as mass](#what-counts-as-mass---adm-mass).
 
 ## Running on a cluster (SLURM)
 

@@ -314,7 +314,6 @@ class SphericalAthdfFileHandler(FileHandler):
     def native_cell_weights(
         self,
         slot: int,
-        keys: tuple[str, ...],
         surface_radius: float | None = None,
         ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
@@ -369,6 +368,8 @@ class SphericalAthdfFileHandler(FileHandler):
         lo = np.concatenate([b[0] for b in bounds], axis=1)
         hi = np.concatenate([b[1] for b in bounds], axis=1)
 
+        keys = (self.mass_density.density_keys if surface_radius is None
+                else self.mass_density.flux_keys)
         shms = []
         try:
             rows = []
@@ -384,6 +385,8 @@ class SphericalAthdfFileHandler(FileHandler):
             for shm in shms:
                 shm.close()
 
+        weights = self.cell_weights_from_values(lo, hi, values, surface_radius)
+
         # r_used is None: nothing was snapped. Unlike a format storing discrete
         # shells, a cell here has radial *extent* containing the request, and
         # its value is the field across that extent, so the sphere the caller
@@ -398,7 +401,7 @@ class SphericalAthdfFileHandler(FileHandler):
         # differing from the surface by up to half a radial cell, is the same
         # O(dr/r) the nearest-shell formats already accept, and is unsigned
         # across blocks so it does not accumulate.
-        return lo, hi, values, None
+        return lo, hi, weights, None
 
     @staticmethod
     def parse_file(

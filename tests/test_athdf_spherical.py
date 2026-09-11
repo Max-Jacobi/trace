@@ -8,6 +8,7 @@ data taken from across the pole with vel2 AND vel3 sign-flipped.
 """
 
 import numpy as np
+from src.utils import cell_centres, densitization_factor
 import h5py
 import pytest
 
@@ -465,23 +466,29 @@ class TestNativeCellWeights:
     The native weight grid for the mass-weighted seeding modes.
 
     Meshblocks arrive flattened into one list of cells, so the tests that
-    matter are about those cells covering the region exactly once. Getting
-    bounds or ghosts wrong scales every sampled mass by the same factor, and
-    no downstream check would notice.
+    matter are about those cells covering the region exactly once and about the
+    weight being the cell's mass rather than a raw field. Getting bounds or
+    ghosts wrong scales every sampled mass by the same factor, and no
+    downstream check would notice.
     """
 
     R_LIM = (10.0, 50.0)
     INTERIOR = (4, 4, 4)
+    VEL = ('V_u_x', 'V_u_y', 'V_u_z')
 
-    def _handler(self, directory, levels=None, locations=None):
-        return SphericalAthdfFileHandler(
-            interpolator=MeshblockPchipInterpolator, directory=str(directory),
-            keys=['rho'], n_cpu=1, files_per_step=1, bh_mass=0.0)
-
-    def _loaded(self, tmp_path, levels=None, locations=None):
-        write_athdf(tmp_path / 's.00000.athdf', 0.0, {'prim': {'rho': smooth_field}},
+    def _loaded(self, tmp_path, levels=None, locations=None, with_velocity=False,
+                **kwargs):
+        fields = {'rho': smooth_field}
+        keys = ['rho']
+        if with_velocity:
+            fields.update({f'vel{i}': smooth_field for i in (1, 2, 3)})
+            keys += list(self.VEL)
+            kwargs.setdefault('vel_keys', self.VEL)
+        write_athdf(tmp_path / 's.00000.athdf', 0.0, {'prim': fields},
                     levels=levels, locations=locations)
-        fh = self._handler(tmp_path)
+        fh = SphericalAthdfFileHandler(
+            interpolator=MeshblockPchipInterpolator, directory=str(tmp_path),
+            keys=keys, n_cpu=1, files_per_step=1, bh_mass=0.0, **kwargs)
         fh.load_chunk(0, True)
         return fh
 
@@ -489,6 +496,32 @@ class TestNativeCellWeights:
     def _volume(lo, hi):
         return float((((hi[0] ** 3 - lo[0] ** 3) / 3)
                       * (hi[1] - lo[1]) * (hi[2] - lo[2])).sum())
+
+    @staticmethod
+    def _at_nodes(fh, keys, i_r=None):
+        """`keys` at every interior node, block by block, via the interpolator."""
+        ng = fh.extra_data['file_ng']
+        i1, i2, i3 = fh.extra_data['interior']
+        r = fh.extra_data['x1v'][:, ng:ng + i1]
+        th = fh.extra_data['x2v'][:, ng:ng + i2]
+        ph = fh.extra_data['x3v'][:, ng:ng + i3]
+        blocks = range(fh.extra_data['shape'][0]) if i_r is None else i_r.keys()
+        pts = []
+        for b in blocks:
+            r_b = r[b] if i_r is None else r[b, i_r[b]:i_r[b] + 1]
+            rg, tg, pg = np.meshgrid(r_b, th[b], ph[b], indexing='ij')
+            pts.append(np.array(sph_to_cart(rg.ravel(), tg.ravel(), pg.ravel())))
+        pos = np.concatenate(pts, axis=1)
+        interps = fh.setup_interpolators(list(keys), fh.shared_memory,
+                                         fh.extra_data)
+        out = []
+        for interp in interps:
+            interp.load()
+            try:
+                out.append(interp(pos))
+            finally:
+                interp.unload()
+        return np.concatenate(out, axis=0), pos
 
     def test_cells_tile_the_domain_volume(self, tmp_path):
         """
@@ -499,9 +532,9 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            lo, hi, vals, r_used = fh.native_cell_weights(0, ("rho",))
+            lo, hi, w, r_used = fh.native_cell_weights(0)
             assert r_used is None
-            assert lo.shape == hi.shape == (3, vals.shape[1])
+            assert lo.shape == hi.shape == (3, w.size)
             assert np.all(hi >= lo)
             r_lo, r_hi = self.R_LIM
             exact = 4 * np.pi * (r_hi ** 3 - r_lo ** 3) / 3
@@ -518,9 +551,9 @@ class TestNativeCellWeights:
         levels, locs = TestOctree()._amr_layout()
         fh = self._loaded(tmp_path, levels=levels, locations=locs)
         try:
-            lo, hi, vals, _ = fh.native_cell_weights(0, ("rho",))
+            lo, hi, w, _ = fh.native_cell_weights(0)
             # 7 coarse blocks plus 8 refined children, all of interior size
-            assert vals.shape[1] == 15 * int(np.prod(self.INTERIOR))
+            assert w.size == 15 * int(np.prod(self.INTERIOR))
             r_lo, r_hi = self.R_LIM
             exact = 4 * np.pi * (r_hi ** 3 - r_lo ** 3) / 3
             assert self._volume(lo, hi) == pytest.approx(exact, rel=1e-6)
@@ -535,9 +568,9 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            lo, hi, vals, _ = fh.native_cell_weights(0, ("rho",))
+            lo, hi, w, _ = fh.native_cell_weights(0)
             n_blocks = fh.extra_data['shape'][0]
-            assert vals.shape == (1, n_blocks * int(np.prod(self.INTERIOR)))
+            assert w.shape == (n_blocks * int(np.prod(self.INTERIOR)),)
             assert lo[0].min() == pytest.approx(self.R_LIM[0], rel=1e-6)
             assert hi[0].max() == pytest.approx(self.R_LIM[1], rel=1e-6)
         finally:
@@ -550,81 +583,91 @@ class TestNativeCellWeights:
         where a left/right mixup in the radial search takes two radial layers
         instead of one and doubles the solid angle.
         """
-        fh = self._loaded(tmp_path)
+        fh = self._loaded(tmp_path, with_velocity=True)
         try:
-            lo, hi, vals, r_used = fh.native_cell_weights(
-                0, ("rho",), surface_radius=r_surf)
+            lo, hi, w, r_used = fh.native_cell_weights(0, surface_radius=r_surf)
             assert r_used is None            # nothing was snapped
-            assert lo.shape == hi.shape == (2, vals.shape[1])
+            assert lo.shape == hi.shape == (2, w.size)
             solid = float(((hi[0] - lo[0]) * (hi[1] - lo[1])).sum())
             assert solid == pytest.approx(4 * np.pi, rel=1e-6)
         finally:
             fh.free_shared_memory()
 
-    def test_values_match_the_interpolator_at_a_cell_centre(self, tmp_path):
+    def test_weight_is_the_cell_mass(self, tmp_path):
         """
-        The point of going native is skipping the interpolator, so the two must
-        agree where they overlap: PCHIP reproduces its own nodes.
+        The point of going native is skipping the interpolator, so the weight
+        must equal density-at-the-node times cell volume: PCHIP reproduces its
+        own nodes, and the cell volume comes from the block's own faces.
         """
         fh = self._loaded(tmp_path)
         try:
-            _, _, vals, _ = fh.native_cell_weights(0, ("rho",))
-            ng = fh.extra_data['file_ng']
-            b, i, j, k = 3, 1, 2, 0
-            r_c = fh.extra_data['x1v'][b, ng + i]
-            th_c = fh.extra_data['x2v'][b, ng + j]
-            ph_c = fh.extra_data['x3v'][b, ng + k]
-            pos = np.array(sph_to_cart(r_c, th_c, ph_c)).reshape(3, 1)
-            interp = fh.setup_interpolators(fh.keys, fh.shared_memory,
-                                            fh.extra_data)[0]
-            interp.load()
-            try:
-                want = float(interp(pos)[0][0])
-            finally:
-                interp.unload()
-            got = vals[0].reshape(-1, *self.INTERIOR)[b, i, j, k]
-            assert got == pytest.approx(want, rel=1e-6)
+            lo, hi, w, _ = fh.native_cell_weights(0)
+            rho, _ = self._at_nodes(fh, ('rho',))
+            dV = (hi[0] ** 3 - lo[0] ** 3) / 3 * (hi[1] - lo[1]) * (hi[2] - lo[2])
+            np.testing.assert_allclose(w, rho[0] * dV, rtol=1e-6)
         finally:
             fh.free_shared_memory()
 
+    def test_an_adm_mass_switches_the_weight_to_the_conserved_density(self, tmp_path):
+        """
+        The rho-vs-D decision is the handler's, and the hook is the only place
+        it shows: same call, same cells, a weight scaled by W*sqrt(gamma).
+        """
+        write_athdf(tmp_path / 's.00000.athdf', 0.0,
+                    {'prim': {'rho': smooth_field,
+                              'u_t': lambda r, th, ph: np.full_like(r, -1.05)}})
+        common = dict(interpolator=MeshblockPchipInterpolator,
+                      directory=str(tmp_path), keys=['rho', 'u_t'],
+                      n_cpu=1, files_per_step=1, bh_mass=0.0)
+        plain = SphericalAthdfFileHandler(**common)
+        dens = SphericalAthdfFileHandler(adm_mass=2.7, **common)
+        try:
+            plain.load_chunk(0, True)
+            dens.load_chunk(0, True)
+            lo, hi, w_plain, _ = plain.native_cell_weights(0)
+            _, _, w_dens, _ = dens.native_cell_weights(0)
+            u_t, _ = self._at_nodes(plain, ('rho', 'u_t'))
+            want = w_plain * densitization_factor((lo[0] + hi[0]) / 2, u_t[1], 2.7)
+            np.testing.assert_allclose(w_dens, want, rtol=1e-6)
+            assert np.all(np.abs(w_dens) > np.abs(w_plain))
+        finally:
+            plain.free_shared_memory()
+            dens.free_shared_memory()
+
     @pytest.mark.parametrize("r_surf", [30.0, 25.0, 27.5])
-    def test_surface_takes_the_cell_containing_the_radius(self, tmp_path, r_surf):
+    def test_surface_weight_is_the_flux_through_the_containing_cell(self, tmp_path, r_surf):
         """
         The solid-angle test alone cannot see a wrong *radial* layer: it still
-        returns one cell per angular patch either way. Pin it by value, against
-        the interpolator at the containing cell's own node.
+        returns one cell per angular patch either way. Pin it by value against
+        the flux at the containing cell's own node, which fixes both the layer
+        and the density the weight was built from.
         """
-        fh = self._loaded(tmp_path)
+        fh = self._loaded(tmp_path, with_velocity=True)
         try:
-            _, _, vals, _ = fh.native_cell_weights(
-                0, ("rho",), surface_radius=r_surf)
+            lo, hi, w, r_used = fh.native_cell_weights(0, surface_radius=r_surf)
+            assert r_used is None
             ng = fh.extra_data['file_ng']
-            x1f, x1v = fh.extra_data['x1f'], fh.extra_data['x1v']
-            i2, i3 = self.INTERIOR[1], self.INTERIOR[2]
-            patches = vals[0].reshape(-1, i2, i3)
-            interp = fh.setup_interpolators(fh.keys, fh.shared_memory,
-                                            fh.extra_data)[0]
-            interp.load()
-            try:
-                checked = 0
-                for b in range(fh.extra_data['shape'][0]):
-                    r_e = x1f[b, ng:ng + self.INTERIOR[0] + 1]
-                    if not (r_e[0] <= r_surf < r_e[-1]):
-                        continue
-                    i_r = int(np.searchsorted(r_e, r_surf, 'right')) - 1
-                    # the chosen cell must actually straddle the sphere
-                    assert r_e[i_r] <= r_surf < r_e[i_r + 1]
-                    j, k = 1, 2
-                    pos = np.array(sph_to_cart(
-                        x1v[b, ng + i_r],
-                        fh.extra_data['x2v'][b, ng + j],
-                        fh.extra_data['x3v'][b, ng + k],
-                    )).reshape(3, 1)
-                    assert patches[checked][j, k] == pytest.approx(
-                        float(interp(pos)[0][0]), rel=1e-6)
-                    checked += 1
-                assert checked == len(patches) > 0
-            finally:
-                interp.unload()
+            x1f = fh.extra_data['x1f']
+            i_r = {}
+            for b in range(fh.extra_data['shape'][0]):
+                r_e = x1f[b, ng:ng + self.INTERIOR[0] + 1]
+                if not (r_e[0] <= r_surf < r_e[-1]):
+                    continue
+                j = int(np.searchsorted(r_e, r_surf, 'right')) - 1
+                assert r_e[j] <= r_surf < r_e[j + 1]   # straddles the sphere
+                i_r[b] = j
+            assert len(i_r) * self.INTERIOR[1] * self.INTERIOR[2] == w.size
+
+            vals, _ = self._at_nodes(fh, ('rho', *self.VEL), i_r=i_r)
+            # The fields are the cell's own samples, but the direction the flux
+            # is projected on is the cell's centre on the sphere -- the sample
+            # sits at the mid-theta of its cell, which is not the mid-cos(theta)
+            # the area element is written in. The seeders have always used the
+            # cell centre for this; the point here is the radial layer and the
+            # density, not that convention.
+            pos = cell_centres(lo, hi, r_surf)
+            v_r = sum(pos[i] * vals[1 + i] for i in range(3)) / r_surf
+            dA = r_surf ** 2 * (hi[0] - lo[0]) * (hi[1] - lo[1])
+            np.testing.assert_allclose(w, vals[0] * v_r * dA, rtol=1e-6)
         finally:
             fh.free_shared_memory()

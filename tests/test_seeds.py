@@ -17,6 +17,7 @@ from src.seeds import (
     _gauss_legendre_surface,
 )
 from src.integrators import ExplicitTrapezoid
+from src.mass import MassDensity
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +73,13 @@ class MockFileHandler:
         The single file time (default: 0.0).
     """
 
-    def __init__(self, density_fn, keys=('rho',), time=0.0):
+    def __init__(self, density_fn, keys=('rho',), time=0.0,
+                 vel_keys=(), adm_mass=None):
         self._density_fn = density_fn
         self.keys = list(keys)
+        # The real FileHandler owns the rho-vs-D decision; the seeders read it
+        # off the handler, so a stand-in has to carry one too.
+        self.mass_density = MassDensity('rho', vel_keys, adm_mass=adm_mass)
         self.times = np.array([time])
         self.cur_times = np.array([time])
         # shared_memory is only passed to setup_interpolator which ignores it.
@@ -295,7 +300,6 @@ class TestSphericalByVolume:
             file_handler=fh,
             vel_keys=['vx', 'vy', 'vz'],
             integrator=ExplicitTrapezoid(),
-            density_key='rho',
         )
         kwargs.update(overrides)
         return spherical_by_volume(**kwargs)
@@ -374,7 +378,7 @@ class TestSphericalByVolume:
             n_r=self.N_R, n_th=self.N_TH, n_ph=self.N_PH,
             start_t=0.0, n_quad=self.N_QUAD, random_shift_in_cell=False,
             file_handler=fh, vel_keys=['vx', 'vy', 'vz'],
-            integrator=ExplicitTrapezoid(), density_key='rho',
+            integrator=ExplicitTrapezoid(),
         )
         full  = spherical_by_volume(phi_min=0.0,  phi_max=2*np.pi, **common)
         half  = spherical_by_volume(phi_min=0.0,  phi_max=np.pi,   **common)
@@ -418,7 +422,7 @@ class TestSphericalByVolume:
             n_r=self.N_R, n_th=self.N_TH, n_ph=self.N_PH,
             start_t=0.0, n_quad=self.N_QUAD, random_shift_in_cell=False,
             file_handler=fh, vel_keys=['vx', 'vy', 'vz'],
-            integrator=ExplicitTrapezoid(), density_key='rho',
+            integrator=ExplicitTrapezoid(),
         )
         north = spherical_by_volume(theta_min=0.0,    theta_max=np.pi/2, **common)
         south = spherical_by_volume(theta_min=np.pi/2, theta_max=np.pi,   **common)

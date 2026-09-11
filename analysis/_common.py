@@ -152,7 +152,10 @@ def tracer_masses(trajs: list[Trajectory]) -> np.ndarray:
     routine, since it samples inflowing cells in proportion to their flux like
     any other. Taking the magnitude here would silently count inflow as ejecta.
 
-    Prefers `mass_D` (the conserved rest mass) when the seeding recorded one.
+    `mass` is whatever the run's file handler decided a mass is -- plain
+    rest mass, or the conserved `D`-based one under `--adm-mass`. Output
+    written before the two were merged carries a separate `mass_D`; prefer it
+    where it exists, so those files keep reading correctly.
     """
     return np.array([t.props.get('mass_D', t.props['mass']) for t in trajs])
 

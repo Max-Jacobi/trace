@@ -94,14 +94,14 @@ class ReducedSurfaceFileHandler(FileHandler):
     def native_cell_weights(
         self,
         slot: int,
-        keys: tuple[str, ...],
         surface_radius: float | None = None,
         ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
         This format is a single global (r, theta, phi) grid, so the cells are
-        the dumped samples themselves. Edges follow the layout documented in
+        the dumped samples themselves, and the whole implementation is one
+        ``tensor_cell_bounds`` call plus the base class's weighting. Edges follow the layout documented in
         ``docs/formats/gr_athena.md``: ``r`` is geometric, so a sample sits at
         the geometric centre of ``[r/sqrt(q), r*sqrt(q)]``; ``theta`` and
         ``phi`` are uniform and cell-centred, so a sample spans half a spacing
@@ -131,6 +131,8 @@ class ReducedSurfaceFileHandler(FileHandler):
             lo, hi = tensor_cell_bounds(cth_edges, ph_edges)
             r_used = float(r[j])
 
+        keys = (self.mass_density.density_keys if surface_radius is None
+                else self.mass_density.flux_keys)
         values = np.empty((len(keys), lo.shape[1]))
         for i_k, key in enumerate(keys):
             shm = SharedMemory(name=self.shared_memory[slot][key])
@@ -140,7 +142,8 @@ class ReducedSurfaceFileHandler(FileHandler):
             finally:
                 shm.close()
 
-        return lo, hi, values, r_used
+        weights = self.cell_weights_from_values(lo, hi, values, surface_radius)
+        return lo, hi, weights, r_used
 
     @staticmethod
     def load_step_to_memory(

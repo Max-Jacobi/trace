@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from src.seeds import spherical_by_volume_mc, spherical_surface_mc, _auto_grid
-from src.utils import tensor_cell_bounds
+from src.utils import cell_measure, tensor_cell_bounds
 from src.integrators import ExplicitTrapezoid
 from tests.test_seeds import MockFileHandler
 from tests.test_seeds_surface import MockSurfaceFileHandler
@@ -217,8 +217,9 @@ class _TwoKeyInterpolator:
 class _TwoKeyFileHandler(MockFileHandler):
     """MockFileHandler exposing a separate, physically signed u_t field."""
 
-    def __init__(self, rho_fn, u_t):
-        super().__init__(rho_fn, keys=('rho', 'u_t'), time=0.0)
+    def __init__(self, rho_fn, u_t, adm_mass=None):
+        super().__init__(rho_fn, keys=('rho', 'u_t'), time=0.0,
+                         adm_mass=adm_mass)
         self.extra_data = {'rho_fn': rho_fn, 'u_t': u_t, 'keys': self.keys}
 
     @staticmethod
@@ -236,10 +237,13 @@ class TestConservativeDensity:
     @staticmethod
     def _seed(adm_mass, n_tracers=200):
         np.random.seed(7)
-        fh = _TwoKeyFileHandler(lambda r: r**-3.0, TestConservativeDensity.U_T)
+        # The ADM mass is the handler's, not the seeder's: whether the weight
+        # is rho or D is a property of the data, and the seeder never asks.
+        fh = _TwoKeyFileHandler(lambda r: r**-3.0, TestConservativeDensity.U_T,
+                                adm_mass=adm_mass)
         return spherical_by_volume_mc(
             r_min=R_MIN, r_max=R_MAX, n_tracers=n_tracers, start_t=0.0,
-            adm_mass=adm_mass, cells_per_tracer=200,
+            cells_per_tracer=200,
             file_handler=fh, integrator=ExplicitTrapezoid(), vel_keys=('rho',),
         )
 
@@ -267,26 +271,27 @@ class _SplitShellHandler(MockFileHandler):
     A handler whose native cells arrive as two adjacent radial groups, with the
     density non-zero in only one of them.
 
-    Cells are handed over flat, so a mistake in the bounds-to-cell pairing is
-    invisible to any total: the mass still sums correctly, it is simply
-    attributed to the wrong cells. Emptying one group turns that into something
-    observable -- every tracer must land in the other.
+    Cells are handed over flat, with a mass each and no field values, so a
+    mistake in the bounds-to-mass pairing is invisible to any total: the mass
+    still sums correctly, it is simply attributed to the wrong cells. Emptying
+    one group turns that into something observable -- every tracer must land in
+    the other.
     """
 
     SPLIT = 400.0
 
-    def native_cell_weights(self, slot, keys, surface_radius=None):
+    def native_cell_weights(self, slot, surface_radius=None):
         n = 8
         cth = np.linspace(1.0, -1.0, 5)
         ph = np.linspace(0.0, 2 * np.pi, 9)
-        los, his, rows = [], [], []
+        los, his, masses = [], [], []
         for r_lo, r_hi, rho in ((R_MIN, self.SPLIT, 0.0), (self.SPLIT, R_MAX, 1.0)):
             lo, hi = tensor_cell_bounds(np.geomspace(r_lo, r_hi, n + 1), cth, ph)
             los.append(lo)
             his.append(hi)
-            rows.append(np.full((len(keys), lo.shape[1]), rho))
+            masses.append(rho * cell_measure(lo, hi))
         return (np.concatenate(los, axis=1), np.concatenate(his, axis=1),
-                np.concatenate(rows, axis=1), None)
+                np.concatenate(masses), None)
 
 
 class TestNativeCellSeeding:

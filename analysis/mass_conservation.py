@@ -197,9 +197,11 @@ def densitize(trajs, masses, m_adm: float) -> np.ndarray:
     """
     out = np.asarray(masses, dtype=float).copy()
     for i, tr in enumerate(trajs):
-        if 'mass_D' in tr.props:
-            # Seeding already sampled D (the '-mc' modes); tracer_masses has
-            # returned that value, so applying the factor again would double it.
+        if 'adm_mass' in tr.props or 'mass_D' in tr.props:
+            # The mass is already densitized: 'adm_mass' says the run weighted
+            # on D throughout, and 'mass_D' is the older output where
+            # tracer_masses has returned the conserved value. Either way,
+            # applying the factor again would double it.
             continue
         d = tr.data
         k = int(np.argmax(d["time"]))

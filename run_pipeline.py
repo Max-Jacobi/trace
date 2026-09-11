@@ -46,7 +46,6 @@ import sys
 import numpy as np
 
 # Re-exported: the tracer masses are rho-based unless a seeder densitizes them.
-from src.utils import densitization_factor
 
 from src.interpolators import (
     PchipInterpolator3D, RegularInterpolator3D, MeshblockPchipInterpolator,
@@ -161,15 +160,15 @@ def parse_args() -> argparse.Namespace:
                               help="Field key for the covariant time component u_t, used to "
                                    "reconstruct the Lorentz factor W = -u_t/alpha for --adm-mass.")
     field_group.add_argument('--adm-mass', type=float, default=None,
-                              help="ADM mass (code units). When given, each tracer's "
-                                   "header also carries 'mass_D', the conserved rest "
-                                   "mass rho*W*sqrt(gamma)*dV, reconstructed from the "
-                                   "tracer's own u_t and an analytic isotropic-"
-                                   "Schwarzschild metric. 'mass' is left as the "
-                                   "rho-based value either way. The 'volume-mc' and "
-                                   "'surface-mc' modes instead weight their sampling "
-                                   "with D directly, so their single 'mass' is already "
-                                   "the conserved one. Requires --ut-key in --keys.")
+                              help="ADM mass (code units). When given, every tracer "
+                                   "mass is the conserved rest mass, weighting with "
+                                   "D = rho*W*sqrt(gamma) reconstructed from u_t and "
+                                   "an analytic isotropic-Schwarzschild metric, "
+                                   "instead of plain rho. This is handed to the file "
+                                   "handler, which decides what it means for its own "
+                                   "data, so a format whose spacetime or coordinates "
+                                   "differ can answer differently. Requires --ut-key "
+                                   "in --keys.")
     field_group.add_argument('--heavy-neutrinos', choices=['sum', 'drop', 'separate'], default='sum',
                               help="--format=athenak only: how to handle AthenaK's 4th (anux) "
                                    "neutrino species, which GR-Athena++ doesn't have. 'sum' folds "
@@ -419,6 +418,13 @@ def build_file_handler(args: argparse.Namespace, interpolator_cls, interpolator_
         file_pattern=args.file_pattern,
         interpolator_kwargs=interpolator_kwargs,
         positive_keys=list(args.positive_keys),
+        # The mass-density policy lives with the data, not with the seeding:
+        # the handler turns these into a src.mass.MassDensity that every seeder
+        # and the output writer then use without knowing which case they are in.
+        density_key=args.density_key,
+        vel_keys=tuple(args.vel_keys),
+        adm_mass=args.adm_mass,
+        ut_key=args.ut_key,
     )
 
     if args.format == 'athenak':
@@ -453,9 +459,6 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
     theta_min, theta_max = np.radians(args.theta_min_deg), np.radians(args.theta_max_deg)
 
     mc_kwargs = dict(
-        density_key=args.density_key,
-        ut_key=args.ut_key,
-        adm_mass=args.adm_mass,
         cells_per_tracer=args.cells_per_tracer,
         weight_grid=args.weight_grid,
         phi_min=phi_min, phi_max=phi_max,
@@ -488,7 +491,6 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
             theta_min=theta_min, theta_max=theta_max,
             random_shift_in_cell=args.random_shift,
             n_quad=args.n_quad,
-            density_key=args.density_key,
             **common_kwargs,
         )
 
@@ -501,7 +503,6 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
         theta_min=theta_min, theta_max=theta_max,
         random_shift_in_cell=args.random_shift,
         n_quad=args.n_quad,
-        density_key=args.density_key,
         **common_kwargs,
     )
 
@@ -509,27 +510,35 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
 def write_output(
     tracers,
     output_dir: str,
-    density_key: str = 'rho',
-    adm_mass: float | None = None,
-    ut_key: str = 'u_t',
+    mass_density,
     ) -> None:
     os.makedirs(output_dir, exist_ok=True)
     filebase = f"{output_dir}/tracer_"
 
+    n_empty = 0
     for tr in tracers.tracers:
-        i_tmax = np.argmax(tr.times)
-        if 'dV' in tr.props:
-            tr.props['mass'] = tr.props['dV'] * tr.data[density_key][i_tmax]
+        # A tracer seeded at the very last snapshot in range never got a step,
+        # so it has no sample to read a mass at. Write it out as it stands --
+        # its 'status' records what happened -- rather than letting an argmax
+        # over nothing destroy the whole run's output at the final step.
+        if len(tr.times) == 0:
+            n_empty += 1
+            tr.output_to_ascii(coords=['x', 'y', 'z'], filebase=filebase)
+            continue
 
-        # 'mass_D' already present means the seeding sampled D directly (the
-        # '-mc' modes), so its mass IS the conserved one. Recomputing here
-        # would apply W*sqrt(gamma) a second time.
-        if adm_mass is not None and 'mass' in tr.props and 'mass_D' not in tr.props:
-            # Same sample the mass itself is taken at, so the two agree.
-            r_seed = float(np.linalg.norm(tr.positions[i_tmax]))
-            factor = densitization_factor(
-                r_seed, float(tr.data[ut_key][i_tmax]), adm_mass)
-            tr.props['mass_D'] = tr.props['mass'] * factor
+        i_tmax = np.argmax(tr.times)
+        # Provenance, not a second mass: it records that 'mass' is already the
+        # conserved D-based one, so a later analysis pass cannot densitize it
+        # twice, and says which ADM mass was used.
+        if mass_density.adm_mass is not None:
+            tr.props['adm_mass'] = float(mass_density.adm_mass)
+        # 'dV' means the seeding recorded a cell volume and left the mass to be
+        # taken from the tracer's own carried fields at its seed sample. What
+        # those fields mean as a density is the handler's call, so ask it.
+        if 'dV' in tr.props:
+            vals = np.array([[tr.data[k][i_tmax]] for k in mass_density.density_keys])
+            pos = np.asarray(tr.positions[i_tmax], dtype=float).reshape(3, 1)
+            tr.props['mass'] = float(tr.props['dV'] * mass_density.density(vals, pos)[0])
 
         # Strip any dotted group prefix ("group.field" -> "field") from data keys.
         short_keys = {key: key.split(".")[-1] for key in tr.data.keys()}
@@ -540,6 +549,10 @@ def write_output(
             del tr.data[key]
 
         tr.output_to_ascii(coords=['x', 'y', 'z'], filebase=filebase)
+
+    if n_empty:
+        print(f"{n_empty} tracer(s) had no integrated samples and were written "
+              "without a mass; they were seeded at the end of the time range.")
 
 
 def main() -> None:
@@ -568,11 +581,7 @@ def main() -> None:
     tracers = seed_tracers(args, integrator, file_handler)
     tracers.integrate(args.start_t, args.end_t)
 
-    write_output(tracers, args.output_dir, density_key=args.density_key,
-                 # The -mc seeders already sample and normalise on D, so their
-                 # 'mass' is the conserved one -- don't densitize it again.
-                 adm_mass=None if args.seed_mode.endswith('-mc') else args.adm_mass,
-                 ut_key=args.ut_key)
+    write_output(tracers, args.output_dir, file_handler.mass_density)
 
 
 if __name__ == "__main__":

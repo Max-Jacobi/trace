@@ -312,6 +312,52 @@ def densitization_factor(r, u_t, adm_mass: float):
     return factor if factor.ndim else float(factor)
 
 
+def sph_to_cart(r, cos_theta, phi) -> np.ndarray:
+    """Cartesian coordinates from (r, cos(theta), phi); any argument may be an array."""
+    sin_theta = np.sqrt(np.clip(1 - np.asarray(cos_theta, dtype=float)**2, 0.0, None))
+    return np.array([r * sin_theta * np.cos(phi),
+                     r * sin_theta * np.sin(phi),
+                     r * cos_theta])
+
+
+def cell_measure(lo: np.ndarray, hi: np.ndarray, r_surf: float | None = None) -> np.ndarray:
+    """
+    Volume of every cell, or its area when it lies on the sphere at `r_surf`.
+
+    `lo` and `hi` are the ``(D, n_cells)`` bounds of
+    :meth:`~src.file.FileHandler.native_cell_weights`, sorted, so the angular
+    extents are plain differences. The last two axes are always
+    ``(cos(theta), phi)``; a volume carries ``r`` in front of them.
+    """
+    d_ang = (hi[-2] - lo[-2]) * (hi[-1] - lo[-1])
+    if r_surf is not None:
+        return r_surf**2 * d_ang
+    return (hi[0]**3 - lo[0]**3) / 3 * d_ang
+
+
+def cell_centres(lo: np.ndarray, hi: np.ndarray, r_surf: float | None = None) -> np.ndarray:
+    """Cartesian centre of every cell, shape (3, n_cells)."""
+    # cos(theta) and phi take the midpoint of the measure dV is written in.
+    # The radial one deliberately does NOT: it is the arithmetic midpoint in r,
+    # not the midpoint of r**3.
+    #
+    # The formally consistent choice would be ((r_lo**3 + r_hi**3)/2)**(1/3),
+    # exact for constant rho. But a radial grid is geometric precisely because
+    # the ejecta falls off roughly as rho ~ r**-3, and expanding both rules
+    # about a cell of ratio 1+e against the exact ln(r_hi/r_lo):
+    #
+    #   arithmetic midpoint : e - e**2/2 + e**3/3        (the exact series)
+    #   r**3      midpoint : e - e**2/2 - 0.42 e**3
+    #
+    # so the arithmetic one is third-order accurate on that profile while the
+    # measure-consistent one is not. Measured on an analytic rho = r**-3 shell
+    # (tests/test_seeds_mc.py) the r**3 midpoint comes out 0.98% low; the
+    # arithmetic one is within 0.1%. Do not "fix" this without rerunning that
+    # test.
+    r = r_surf if r_surf is not None else (lo[0] + hi[0]) / 2
+    return sph_to_cart(r, (lo[-2] + hi[-2]) / 2, (lo[-1] + hi[-1]) / 2)
+
+
 def tensor_cell_bounds(*edges: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     Flat per-cell coordinate bounds for one separable grid.
