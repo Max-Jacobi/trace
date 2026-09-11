@@ -688,24 +688,41 @@ def _grid_cells(*edges: np.ndarray, r_surf: float | None = None) -> _Cells:
 
 def _native_cells(file_handler, slot, ranges, r_surf=None):
     """
-    Ask the format for its own cells and their masses, and keep those whose
-    centre is in ``ranges`` -- one ``(lo, hi)`` pair per axis of the bounds.
+    Ask the format for its own cells and their masses, and cut them to exactly
+    ``ranges`` -- one ``(lo, hi)`` pair per axis of the bounds.
+
+    Cells wholly inside are kept, cells wholly outside dropped, and a cell a
+    limit passes through is cut at that limit, its mass scaled by the fraction
+    of its measure left. The native value is constant across a cell, so that
+    fraction is exact. The region's edge is then the limit itself rather than
+    whichever cell face happens to lie near it, which is what makes a volume
+    seeded out to R and a surface seeded at R share exactly one boundary.
+
+    The spherical measure factorises as ``r**3/3 * cos(theta) * phi``, so the
+    fraction is a product over axes: a ratio of ``r**3`` differences on the
+    radial one, of plain differences on the angular ones.
     """
-    lo, hi, weights, r_used = file_handler.native_cell_weights(
-        slot, surface_radius=r_surf)
-    keep = np.ones(lo.shape[1], dtype=bool)
+    lo, hi, weights = file_handler.native_cell_weights(slot, surface_radius=r_surf)
+    lo, hi = lo.copy(), hi.copy()
+    frac = np.ones(lo.shape[1])
     for axis, (a, b) in enumerate(ranges):
-        centre = (lo[axis] + hi[axis]) / 2
-        keep &= (centre >= min(a, b)) & (centre <= max(a, b))
+        a, b = min(a, b), max(a, b)
+        cut_lo, cut_hi = np.maximum(lo[axis], a), np.minimum(hi[axis], b)
+        # Volume bounds carry r first; surface bounds are angular only.
+        p = 3 if (r_surf is None and axis == 0) else 1
+        with np.errstate(divide='ignore', invalid='ignore'):
+            frac *= np.where(cut_hi > cut_lo,
+                             (cut_hi**p - cut_lo**p) / (hi[axis]**p - lo[axis]**p),
+                             0.0)
+        lo[axis], hi[axis] = cut_lo, cut_hi
+    keep = frac > 0
     if not keep.any():
         raise ValueError(
             "No native cell falls in the requested region; check --r-min/--r-max "
             "and the angular limits against the data's extent."
         )
-    # None means the format did not snap: keep the radius the caller asked for.
-    cells = _Cells(lo[:, keep], hi[:, keep],
-                   r_surf=r_surf if r_used is None else r_used)
-    return cells, weights[keep]
+    cells = _Cells(lo[:, keep], hi[:, keep], r_surf=r_surf)
+    return cells, weights[keep] * frac[keep]
 
 
 def _helper_weights(file_handler, i_loc, cells, radial: bool) -> np.ndarray:
@@ -942,15 +959,13 @@ def spherical_surface_mc(
     ranges = ((np.cos(theta_max), np.cos(theta_min)), (phi_min, phi_max))
 
     if native:
-        # The data's own cells set the angular resolution, and the format
-        # decides whether r_surf needs snapping. One probe load to fix the cell
-        # layout; the fluxes are re-read per time step below.
+        # The data's own cells set the angular resolution. The sphere stays at
+        # exactly r_surf, so it is the outer boundary of a volume seeded to the
+        # same radius. One probe load to fix the cell layout; the fluxes are
+        # re-read per time step below.
         i_probe = int(np.argmin(np.abs(np.asarray(file_handler.times) - t_start[0])))
         file_handler.load_chunk(i_probe, forward=True)
         cells, _ = _native_cells(file_handler, 0, ranges, r_surf=r_surf)
-        if not np.isclose(cells.r_surf, r_surf, rtol=1e-3):
-            print(f"--r-surf {r_surf:g} snapped to the grid shell at {cells.r_surf:g}.")
-        r_surf = cells.r_surf
     else:
         n_th, n_ph = _auto_grid(
             max(cells_per_tracer * n_tracers // n_t, 4),

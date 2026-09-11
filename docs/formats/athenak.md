@@ -75,8 +75,11 @@ by clipping the edges to the physical range. The check that matters is that
 the cell measures still sum to `4 pi`, which `tests/test_athenak.py` asserts
 for both conventions.
 
-Under `surface-mc`, `--r-surf` is snapped to the nearest dumped shell and the
-radius it moved to is printed, so nothing is interpolated radially either.
+Region limits are cut exactly: `--r-max` and the angular limits clip the
+cells they pass through, and `surface-mc` puts its sphere at exactly
+`--r-surf`, taking the flux from the shell whose cell contains it. A volume
+and a surface seeded at the same radius therefore share one boundary -- see
+[the README](../../README.md#where-the-sampling-weights-come-from---weight-grid).
 The grid-based `volume` and `surface` modes work unchanged and ignore all of
 this.
 

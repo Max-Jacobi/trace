@@ -246,7 +246,7 @@ compare it against their own (`src.seeds.GRID_GEOMETRY`) before reading a
 single bound: `--weight-grid native` refuses a mismatch, and `auto` falls back
 to the helper grid, which is exact in any geometry because it only ever hands
 your interpolator Cartesian points. The base class declares `None`, so a
-format that forgets is refused rather than misread. Return `lo, hi, weights, r_used`, where `lo` and `hi` are
+format that forgets is refused rather than misread. Return `lo, hi, weights`, where `lo` and `hi` are
 `(D, n_cells)`: the lower and upper bound of every cell along every axis,
 `(r, cos_theta, phi)` for a volume and `(cos_theta, phi)` for a single shell.
 
@@ -289,11 +289,15 @@ Four things to get right:
   radial axis a sample sits at the geometric centre of its cell, so the bounds
   are at `r * q**(-+1/2)`; for a uniform cell-centred angular axis they are
   half a spacing either side. Getting this wrong biases every cell mass.
-- **Snap, do not interpolate.** With `surface_radius` given, pick the nearest
-  shell and report it back as `r_used`. The caller tells the user what it
-  moved to. Return `None` if you did not snap -- a format whose cells have
-  radial *extent* containing the requested radius has nothing to move, and
-  `None` says so, leaving the caller's own radius in place.
+- **Take the cell the sphere passes through, and say where its value was
+  sampled.** With `surface_radius` given, return the one radial cell per
+  angular patch whose extent contains it, half-open `r_lo <= R < r_hi` so a
+  sphere on a face takes exactly one layer. Do not snap or interpolate: the
+  sphere stays at `R`, so it is exactly the boundary of a volume seeded to `R`.
+  Pass each value's own sample radius to `cell_weights_from_values` as
+  `r_sample` -- one number for global shells, one per cell under AMR -- so the
+  flux is `r_sample**2 rho v_r`, the conserved quantity, rather than `rho v_r`
+  carried to `R` and scaled by `R**2`.
 
 `lo <= hi` is required elementwise, which `tensor_cell_bounds` already
 guarantees. An axis running downward is fine and common -- AthenaK's

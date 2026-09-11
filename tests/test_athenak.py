@@ -782,8 +782,7 @@ class TestNativeCellWeights:
     def test_cells_tile_the_full_solid_angle(self, tmp_path, convention):
         fh = self._loaded(tmp_path, convention)
         try:
-            lo, hi, w, r_used = fh.native_cell_weights(0)
-            assert r_used is None
+            lo, hi, w = fh.native_cell_weights(0)
             assert lo.shape == hi.shape == (3, w.size)
             assert np.all(hi >= lo)
             r = np.asarray(fh.extra_data['r'])
@@ -802,22 +801,47 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, convention)
         try:
-            lo, hi, _, _ = fh.native_cell_weights(0)
+            lo, hi, _ = fh.native_cell_weights(0)
             assert lo[1].min() == pytest.approx(-1.0)
             assert hi[1].max() == pytest.approx(1.0)
         finally:
             fh.free_shared_memory()
 
-    def test_surface_radius_snaps_to_a_shell(self, tmp_path):
+    @staticmethod
+    def _containing_shell(fh, radius):
+        """Index of the shell whose cell (edges at the ln-r midpoints) holds `radius`."""
+        ln_r = np.log(np.asarray(fh.extra_data['r'], dtype=float))
+        mid = (ln_r[:-1] + ln_r[1:]) / 2
+        edges = np.exp(np.concatenate(([2 * ln_r[0] - mid[0]], mid,
+                                       [2 * ln_r[-1] - mid[-1]])))
+        return int(np.searchsorted(edges, radius, 'right')) - 1
+
+    def test_surface_takes_the_shell_whose_cell_contains_the_radius(self, tmp_path):
+        """
+        Off a node, the sphere stays where it was asked for and the flux comes
+        from the shell whose cell it passes through -- measured at that shell's
+        own radius, so it equals the flux requested exactly on the node.
+        """
         fh = self._loaded(tmp_path, "mu_node", with_velocity=True)
         try:
             r = np.asarray(fh.extra_data['r'])
             target = float(r[3]) * 1.01          # deliberately off-grid
-            lo, hi, w, r_used = fh.native_cell_weights(0, surface_radius=target)
-            assert r_used == pytest.approx(float(r[3]))
+            j = self._containing_shell(fh, target)
+            lo, hi, w = fh.native_cell_weights(0, surface_radius=target)
+            _, _, w_node = fh.native_cell_weights(0, surface_radius=float(r[j]))
             assert lo.shape == hi.shape == (2, w.size)   # (cos theta, phi)
+            np.testing.assert_allclose(w, w_node, rtol=1e-12)
             solid = ((hi[0] - lo[0]) * (hi[1] - lo[1])).sum()
             assert solid == pytest.approx(4 * np.pi, rel=1e-12)
+        finally:
+            fh.free_shared_memory()
+
+    def test_a_radius_beyond_the_shells_is_refused(self, tmp_path):
+        fh = self._loaded(tmp_path, "mu_node", with_velocity=True)
+        try:
+            r = np.asarray(fh.extra_data['r'])
+            with pytest.raises(ValueError, match="outside the dumped shells"):
+                fh.native_cell_weights(0, surface_radius=float(r[-1]) * 2)
         finally:
             fh.free_shared_memory()
 
@@ -851,7 +875,7 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, convention)
         try:
-            lo, hi, w, _ = fh.native_cell_weights(0)
+            lo, hi, w = fh.native_cell_weights(0)
             rho, _ = self._at_nodes(fh, ("rho",))
             dV = (hi[0]**3 - lo[0]**3) / 3 * (hi[1] - lo[1]) * (hi[2] - lo[2])
             np.testing.assert_allclose(*self._comparable(fh, w, rho[0] * dV),
@@ -874,8 +898,8 @@ class TestNativeCellWeights:
         try:
             plain.load_chunk(0, forward=True)
             dens.load_chunk(0, forward=True)
-            lo, hi, w_plain, _ = plain.native_cell_weights(0)
-            _, _, w_dens, _ = dens.native_cell_weights(0)
+            lo, hi, w_plain = plain.native_cell_weights(0)
+            _, _, w_dens = dens.native_cell_weights(0)
             u_t, _ = self._at_nodes(plain, ("u_t",))
             want = w_plain * densitization_factor(
                 (lo[0] + hi[0]) / 2, u_t[0], 2.7)
@@ -894,12 +918,12 @@ class TestNativeCellWeights:
         try:
             r = np.asarray(fh.extra_data['r'])
             i_r = 3
-            lo, hi, w, r_used = fh.native_cell_weights(
+            lo, hi, w = fh.native_cell_weights(
                 0, surface_radius=float(r[i_r]))
             vals, pos = self._at_nodes(fh, ("rho", *self.VEL), i_r=i_r)
             v_r = sum(pos[i] * vals[1 + i] for i in range(3)) \
                 / np.linalg.norm(pos, axis=0)
-            dA = r_used**2 * (hi[0] - lo[0]) * (hi[1] - lo[1])
+            dA = float(r[i_r])**2 * (hi[0] - lo[0]) * (hi[1] - lo[1])
             np.testing.assert_allclose(
                 *self._comparable(fh, w, vals[0] * v_r * dA), rtol=1e-6)
             assert np.any(w < 0) and np.any(w > 0)

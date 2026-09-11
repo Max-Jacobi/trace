@@ -287,7 +287,7 @@ def parse_args() -> argparse.Namespace:
                             default='auto',
                             help="Grid the sampling weights are built on. 'native' uses "
                                  "the data's own grid with no interpolation anywhere "
-                                 "(and snaps --r-surf to a grid shell), which is both "
+                                 "which is both "
                                  "more accurate and cheaper, but needs the format to "
                                  "implement native_cell_weights. 'helper' always builds "
                                  "the interpolated grid sized by --cells-per-tracer. "
@@ -312,7 +312,7 @@ def parse_args() -> argparse.Namespace:
                             default='auto',
                             help="Grid the sampling weights are built on. 'native' uses "
                                  "the data's own grid with no interpolation anywhere "
-                                 "(and snaps --r-surf to a grid shell), which is both "
+                                 "which is both "
                                  "more accurate and cheaper, but needs the format to "
                                  "implement native_cell_weights. 'helper' always builds "
                                  "the interpolated grid sized by --cells-per-tracer. "

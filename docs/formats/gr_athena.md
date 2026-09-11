@@ -72,10 +72,14 @@ implements `native_cell_weights`, so `--weight-grid native` builds the
 sampling weights on the dumped samples themselves, with no interpolation
 and no helper grid. `auto` (the default) picks it here anyway; spelling it
 out makes a run self-documenting and turns a missing implementation into an
-error rather than a silent fallback. Under `surface-mc` it also snaps
-`--r-surf` to the nearest dumped shell and prints the radius it moved to,
-so nothing is interpolated radially either. The grid-based `volume` and
-`surface` modes work unchanged and ignore all of this.
+error rather than a silent fallback. Region limits are cut exactly:
+`--r-max` and the angular limits clip the cells they pass through, and
+`surface-mc` puts its sphere at exactly `--r-surf`, taking the flux from the
+shell whose cell contains it. A volume and a surface seeded at the same
+radius therefore share one boundary -- see
+[the README](../../README.md#where-the-sampling-weights-come-from---weight-grid).
+The grid-based `volume` and `surface` modes work unchanged and ignore all of
+this.
 
 `reduced_surface` is the default format, so `--format` can be omitted. It
 sets these defaults:

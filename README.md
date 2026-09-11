@@ -434,11 +434,27 @@ build their sampling weights. Two ways to get it:
 - `helper` lays a grid of its own, sized from `--cells-per-tracer`, and
   interpolates the fields onto it.
 - `native` uses the data's own grid directly, with no interpolation anywhere.
-  For a surface it also snaps `--r-surf` to the nearest grid shell, so no
-  radial interpolation happens either, and prints the radius it moved to.
 - `auto` (the default) takes `native` where the format provides it and falls
   back to `helper` otherwise. `native` errors rather than falling back, so a
   run cannot silently change what it sampled.
+
+Either way the region is exactly the one you gave. The helper grid is laid out
+on your limits, and the native cells are cut at them: a cell `--r-max` or an
+angular limit passes through keeps only the part inside, with its mass scaled
+by that fraction of its measure, which is exact for the piecewise-constant
+value a native cell holds. `surface-mc` puts its sphere at exactly `--r-surf`
+and nothing is snapped, so **a `volume-mc` run to `--r-max R` and a
+`surface-mc` run at `--r-surf R` share one boundary**: every parcel is in one
+population or the other, never both and never neither.
+
+On the native grid the sphere's flux comes from the cell it passes through,
+measured at that cell's own sample radius `r_j` as `r_j**2 rho v_r` and carried
+to `R` unchanged. That is a nearest-neighbour value in radius, but of
+`r**2 rho v_r`, which a steady radial outflow conserves. Carrying `rho v_r`
+instead and multiplying by `R**2` would be off by `(R/r_j)**2` -- up to one
+radial cell's `q`, the same for every cell of a global grid, so it would not
+average out. What remains is only the flow's departure from steady state
+across half a cell.
 
 Every format shipped here implements it: `reduced_surface` and `athenak` hold
 one global grid, and `athdf_spherical` pools the cells of every meshblock. A
@@ -540,7 +556,10 @@ snapshot data is staged in `/dev/shm` (shared memory), not process heap
   `--start-t` to be caught by it. Run both against the same `R`, then
   integrate each backward from its own seed time; together they cover the
   ejecta without double-counting (a given parcel is either still inside at
-  `--start-t`, or already crossed -- never both). See
+  `--start-t`, or already crossed -- never both). The two share `R` exactly,
+  not to within a cell: neither snaps, and native cells are cut at the limit
+  (see [`--weight-grid`](#where-the-sampling-weights-come-from---weight-grid)).
+  See
   [Matching cell shapes and masses between `volume` and `surface`](#matching-cell-shapes-and-masses-between-volume-and-surface)
   for how to size the two grids so they combine into one consistent
   tracer population.

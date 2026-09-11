@@ -532,8 +532,7 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            lo, hi, w, r_used = fh.native_cell_weights(0)
-            assert r_used is None
+            lo, hi, w = fh.native_cell_weights(0)
             assert lo.shape == hi.shape == (3, w.size)
             assert np.all(hi >= lo)
             r_lo, r_hi = self.R_LIM
@@ -551,7 +550,7 @@ class TestNativeCellWeights:
         levels, locs = TestOctree()._amr_layout()
         fh = self._loaded(tmp_path, levels=levels, locations=locs)
         try:
-            lo, hi, w, _ = fh.native_cell_weights(0)
+            lo, hi, w = fh.native_cell_weights(0)
             # 7 coarse blocks plus 8 refined children, all of interior size
             assert w.size == 15 * int(np.prod(self.INTERIOR))
             r_lo, r_hi = self.R_LIM
@@ -568,7 +567,7 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            lo, hi, w, _ = fh.native_cell_weights(0)
+            lo, hi, w = fh.native_cell_weights(0)
             n_blocks = fh.extra_data['shape'][0]
             assert w.shape == (n_blocks * int(np.prod(self.INTERIOR)),)
             assert lo[0].min() == pytest.approx(self.R_LIM[0], rel=1e-6)
@@ -585,8 +584,7 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, with_velocity=True)
         try:
-            lo, hi, w, r_used = fh.native_cell_weights(0, surface_radius=r_surf)
-            assert r_used is None            # nothing was snapped
+            lo, hi, w = fh.native_cell_weights(0, surface_radius=r_surf)
             assert lo.shape == hi.shape == (2, w.size)
             solid = float(((hi[0] - lo[0]) * (hi[1] - lo[1])).sum())
             assert solid == pytest.approx(4 * np.pi, rel=1e-6)
@@ -601,7 +599,7 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            lo, hi, w, _ = fh.native_cell_weights(0)
+            lo, hi, w = fh.native_cell_weights(0)
             rho, _ = self._at_nodes(fh, ('rho',))
             dV = (hi[0] ** 3 - lo[0] ** 3) / 3 * (hi[1] - lo[1]) * (hi[2] - lo[2])
             np.testing.assert_allclose(w, rho[0] * dV, rtol=1e-6)
@@ -624,8 +622,8 @@ class TestNativeCellWeights:
         try:
             plain.load_chunk(0, True)
             dens.load_chunk(0, True)
-            lo, hi, w_plain, _ = plain.native_cell_weights(0)
-            _, _, w_dens, _ = dens.native_cell_weights(0)
+            lo, hi, w_plain = plain.native_cell_weights(0)
+            _, _, w_dens = dens.native_cell_weights(0)
             u_t, _ = self._at_nodes(plain, ('rho', 'u_t'))
             want = w_plain * densitization_factor((lo[0] + hi[0]) / 2, u_t[1], 2.7)
             np.testing.assert_allclose(w_dens, want, rtol=1e-6)
@@ -644,8 +642,7 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, with_velocity=True)
         try:
-            lo, hi, w, r_used = fh.native_cell_weights(0, surface_radius=r_surf)
-            assert r_used is None
+            lo, hi, w = fh.native_cell_weights(0, surface_radius=r_surf)
             ng = fh.extra_data['file_ng']
             x1f = fh.extra_data['x1f']
             i_r = {}
@@ -659,15 +656,36 @@ class TestNativeCellWeights:
             assert len(i_r) * self.INTERIOR[1] * self.INTERIOR[2] == w.size
 
             vals, _ = self._at_nodes(fh, ('rho', *self.VEL), i_r=i_r)
-            # The fields are the cell's own samples, but the direction the flux
-            # is projected on is the cell's centre on the sphere -- the sample
-            # sits at the mid-theta of its cell, which is not the mid-cos(theta)
-            # the area element is written in. The seeders have always used the
-            # cell centre for this; the point here is the radial layer and the
-            # density, not that convention.
-            pos = cell_centres(lo, hi, r_surf)
-            v_r = sum(pos[i] * vals[1 + i] for i in range(3)) / r_surf
-            dA = r_surf ** 2 * (hi[0] - lo[0]) * (hi[1] - lo[1])
+            # The flux is taken where each value was sampled -- r**2 rho v_r at
+            # the block's own x1v -- and carried to the sphere unchanged. The
+            # projection direction is the cell's centre in (cos theta, phi).
+            x1v = fh.extra_data['x1v']
+            r_s = np.repeat([x1v[b, ng + j] for b, j in i_r.items()],
+                            self.INTERIOR[1] * self.INTERIOR[2])
+            pos = cell_centres(lo, hi, r_s)
+            v_r = sum(pos[i] * vals[1 + i] for i in range(3)) / r_s
+            dA = r_s ** 2 * (hi[0] - lo[0]) * (hi[1] - lo[1])
             np.testing.assert_allclose(w, vals[0] * v_r * dA, rtol=1e-6)
+        finally:
+            fh.free_shared_memory()
+
+    @pytest.mark.parametrize("amr", [False, True])
+    @pytest.mark.parametrize("r_edge", [27.5, 30.0])
+    def test_a_clipped_volume_ends_exactly_on_the_sphere(self, tmp_path, amr, r_edge):
+        """
+        The volume a seeder takes out to R must be bounded by exactly the
+        sphere a surface seeder uses at R -- no half cell either way, at any
+        refinement level. 27.5 sits inside a cell, 30.0 on a block face.
+        """
+        from src.seeds import _native_cells
+        levels, locs = TestOctree()._amr_layout() if amr else (None, None)
+        fh = self._loaded(tmp_path, levels=levels, locations=locs)
+        try:
+            r_lo = self.R_LIM[0]
+            cells, _ = _native_cells(fh, 0, ranges=((r_lo, r_edge), (-1.0, 1.0),
+                                                    (0.0, 2 * np.pi)))
+            assert cells.hi[0].max() == pytest.approx(r_edge, rel=1e-12)
+            exact = 4 * np.pi * (r_edge ** 3 - r_lo ** 3) / 3
+            assert cells.measure().sum() == pytest.approx(exact, rel=1e-6)
         finally:
             fh.free_shared_memory()

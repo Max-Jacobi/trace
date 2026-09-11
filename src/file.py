@@ -188,7 +188,7 @@ class FileHandler(ABC):
         lo: np.ndarray,
         hi: np.ndarray,
         values: np.ndarray,
-        surface_radius: float | None,
+        r_sample: float | np.ndarray | None = None,
         ) -> np.ndarray:
         """
         The sampling weight of every cell, from the fields on them.
@@ -198,12 +198,22 @@ class FileHandler(ABC):
         them, and this turns them into the mass each cell holds, or -- on a
         surface -- the mass crossing it per unit time.
 
-        `values` follows ``self.mass_density.density_keys``, or ``flux_keys``
-        when `surface_radius` is given.
+        `values` follows ``self.mass_density.density_keys`` for volume cells,
+        or ``flux_keys`` for surface cells.
+
+        `r_sample` is None for volume cells. For surface cells it is the radius
+        each value was actually sampled at -- one number for a format storing
+        global shells, one per cell under AMR. The flux is evaluated *there*,
+        ``r_sample**2 * rho * v_r`` per unit solid angle, and handed to the
+        requested sphere unchanged. That is a nearest-neighbour carry of
+        ``r**2 rho v_r``, the conserved flux of a steady radial outflow, rather
+        than of ``rho v_r``: carrying the latter and multiplying by the
+        requested radius squared would be off by ``(R/r_sample)**2``, the same
+        for every cell of a global grid and so not averaging out.
         """
-        pos = cell_centres(lo, hi, surface_radius)
-        measure = cell_measure(lo, hi, surface_radius)
-        if surface_radius is None:
+        pos = cell_centres(lo, hi, r_sample)
+        measure = cell_measure(lo, hi, r_sample)
+        if r_sample is None:
             return self.mass_density.density(values, pos) * measure
         return self.mass_density.radial_flux(values, pos) * measure
 
@@ -211,7 +221,7 @@ class FileHandler(ABC):
         self,
         slot: int,
         surface_radius: float | None = None,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         The format's **own** cells, as coordinate bounds plus a weight each.
 
@@ -247,8 +257,13 @@ class FileHandler(ABC):
             Shared-memory slot holding the snapshot to read, i.e. an index into
             ``self.shared_memory`` alongside ``cur_times``.
         surface_radius : float or None
-            When None, return volume cells. Otherwise return only the cells
-            covering that sphere, with two axes instead of three.
+            When None, return volume cells. Otherwise return the cells the
+            sphere at exactly that radius passes through -- the one radial cell
+            per angular patch whose extent contains it, half-open
+            ``r_lo <= R < r_hi`` so a sphere on a face takes exactly one layer --
+            with two axes instead of three. Nothing is snapped: the sphere is
+            the one asked for, so it coincides exactly with the outer boundary
+            of a volume seeded out to the same radius.
 
         The axes are those of :attr:`grid_geometry`, which a format
         implementing this must set. Every seeder in :mod:`src.seeds` works in
@@ -265,12 +280,10 @@ class FileHandler(ABC):
             caller the special case.
         weights : ndarray, shape (n_cells,)
             The mass each cell holds, or -- when `surface_radius` is given --
-            the mass crossing it per unit time, signed so that an inflowing
-            cell is negative.
-        r_used : float or None
-            The radius the cells actually sit at, when `surface_radius` was
-            given and the format snapped it to its own grid. None means it did
-            not snap and the requested radius still applies.
+            the mass crossing the sphere through that cell's patch per unit
+            time, signed so that an inflowing patch is negative. Pass the
+            radius each surface value was sampled at to
+            :meth:`cell_weights_from_values` as ``r_sample``; see there for why.
 
         Raises
         ------

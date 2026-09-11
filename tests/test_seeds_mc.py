@@ -292,7 +292,7 @@ class _SplitShellHandler(MockFileHandler):
             his.append(hi)
             masses.append(rho * cell_measure(lo, hi))
         return (np.concatenate(los, axis=1), np.concatenate(his, axis=1),
-                np.concatenate(masses), None)
+                np.concatenate(masses))
 
 
 class TestNativeCellSeeding:
@@ -310,6 +310,23 @@ class TestNativeCellSeeding:
         r = _radii(self._seed())
         assert r.min() >= _SplitShellHandler.SPLIT
         assert r.max() <= R_MAX * (1 + 1e-12)
+
+    def test_a_mid_cell_r_max_is_honoured_exactly(self):
+        """
+        700 falls inside an outer cell. The volume must stop at 700 itself, not
+        at that cell's face, so rho = 1 gives exactly 4/3 pi (700^3 - split^3)
+        and no tracer lands beyond it.
+        """
+        np.random.seed(3)
+        fh = _SplitShellHandler(lambda r: np.ones_like(r), keys=('rho',), time=0.0)
+        tr = spherical_by_volume_mc(
+            r_min=R_MIN, r_max=700.0, n_tracers=2000, start_t=0.0,
+            weight_grid='native',
+            file_handler=fh, integrator=ExplicitTrapezoid(), vel_keys=('rho',),
+        )
+        expected = 4 / 3 * np.pi * (700.0**3 - _SplitShellHandler.SPLIT**3)
+        assert _masses(tr).sum() == pytest.approx(expected, rel=1e-12)
+        assert _radii(tr).max() <= 700.0 * (1 + 1e-12)
 
     def test_total_mass_is_the_populated_shell_only(self):
         """rho = 1 outside the split, so M = 4/3 pi (r_max^3 - split^3)."""

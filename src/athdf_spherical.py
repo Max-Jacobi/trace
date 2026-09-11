@@ -316,7 +316,7 @@ class SphericalAthdfFileHandler(FileHandler):
         self,
         slot: int,
         surface_radius: float | None = None,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
@@ -348,6 +348,7 @@ class SphericalAthdfFileHandler(FileHandler):
         if surface_radius is None:
             blocks = np.arange(shape[0])
             i_r = None
+            r_sample = None
         else:
             # Half-open on purpose. A block whose lower interior face equals
             # r_surf owns it; its inner neighbour, whose upper face equals it,
@@ -363,6 +364,11 @@ class SphericalAthdfFileHandler(FileHandler):
             # Same cell as searchsorted(..., 'right') - 1, row by row. The
             # bounds test above already guarantees it lands in [0, i1).
             i_r = (r_f[blocks] <= surface_radius).sum(axis=1) - 1
+            # Where each block's value was sampled, one radius per angular cell.
+            # Under AMR the blocks meeting the sphere sit at different levels,
+            # so these differ from block to block; the sphere itself does not.
+            x1v = np.asarray(self.extra_data['x1v'])
+            r_sample = np.repeat(x1v[blocks, ng + i_r], i2 * i3)
 
         faces = ((r_f, cth_f, ph_f) if i_r is None else (cth_f, ph_f))
         bounds = [tensor_cell_bounds(*(f[b] for f in faces)) for b in blocks]
@@ -386,23 +392,8 @@ class SphericalAthdfFileHandler(FileHandler):
             for shm in shms:
                 shm.close()
 
-        weights = self.cell_weights_from_values(lo, hi, values, surface_radius)
-
-        # r_used is None: nothing was snapped. Unlike a format storing discrete
-        # shells, a cell here has radial *extent* containing the request, and
-        # its value is the field across that extent, so the sphere the caller
-        # asked for is the one to attribute the flux to.
-        #
-        # Using per-block cell-centre radii instead would be wrong, not merely
-        # different: under AMR the blocks meeting r_surf sit at different
-        # levels with different radial cells, so there is no single radius, and
-        # the "sphere" becomes a ragged staircase whose areas do not sum to
-        # 4*pi*r**2 -- biasing the total flux by whatever the level
-        # distribution happens to be. The residual, a cell's sample radius
-        # differing from the surface by up to half a radial cell, is the same
-        # O(dr/r) the nearest-shell formats already accept, and is unsigned
-        # across blocks so it does not accumulate.
-        return lo, hi, weights, None
+        weights = self.cell_weights_from_values(lo, hi, values, r_sample)
+        return lo, hi, weights
 
     @staticmethod
     def parse_file(

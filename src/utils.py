@@ -320,9 +320,11 @@ def sph_to_cart(r, cos_theta, phi) -> np.ndarray:
                      r * cos_theta])
 
 
-def cell_measure(lo: np.ndarray, hi: np.ndarray, r_surf: float | None = None) -> np.ndarray:
+def cell_measure(lo: np.ndarray, hi: np.ndarray,
+                 r_surf: float | np.ndarray | None = None) -> np.ndarray:
     """
-    Volume of every cell, or its area when it lies on the sphere at `r_surf`.
+    Volume of every cell, or its area when it lies on the sphere at `r_surf`
+    (one radius, or one per cell).
 
     `lo` and `hi` are the ``(D, n_cells)`` bounds of
     :meth:`~src.file.FileHandler.native_cell_weights`, sorted, so the angular
@@ -335,7 +337,8 @@ def cell_measure(lo: np.ndarray, hi: np.ndarray, r_surf: float | None = None) ->
     return (hi[0]**3 - lo[0]**3) / 3 * d_ang
 
 
-def cell_centres(lo: np.ndarray, hi: np.ndarray, r_surf: float | None = None) -> np.ndarray:
+def cell_centres(lo: np.ndarray, hi: np.ndarray,
+                 r_surf: float | np.ndarray | None = None) -> np.ndarray:
     """Cartesian centre of every cell, shape (3, n_cells)."""
     # cos(theta) and phi take the midpoint of the measure dV is written in.
     # The radial one deliberately does NOT: it is the arithmetic midpoint in r,

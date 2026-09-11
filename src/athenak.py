@@ -527,7 +527,7 @@ class AthenaKFileHandler(FileHandler):
         self,
         slot: int,
         surface_radius: float | None = None,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
@@ -562,19 +562,30 @@ class AthenaKFileHandler(FileHandler):
         d_ph = ph[1] - ph[0]
         ph_edges = np.concatenate((ph - d_ph / 2, [ph[-1] + d_ph / 2]))
 
+        ln_r = np.log(r)
+        mid = (ln_r[:-1] + ln_r[1:]) / 2
+        r_edges = np.exp(np.concatenate((
+            [2 * ln_r[0] - mid[0]], mid, [2 * ln_r[-1] - mid[-1]])))
+
         if surface_radius is None:
-            ln_r = np.log(r)
-            mid = (ln_r[:-1] + ln_r[1:]) / 2
-            r_edges = np.exp(np.concatenate((
-                [2 * ln_r[0] - mid[0]], mid, [2 * ln_r[-1] - mid[-1]])))
             i_r = slice(None)
             lo, hi = tensor_cell_bounds(r_edges, cth_edges, ph_edges)
-            r_used = None
+            r_sample = None
         else:
-            j = int(np.argmin(np.abs(r - surface_radius)))
+            # The shell whose cell the sphere passes through, half-open so a
+            # sphere on a face takes exactly one. Not the nearest shell: the
+            # sphere stays at exactly the radius asked for, so it is the outer
+            # boundary of a volume seeded to the same radius, and this shell's
+            # value stands for the flux through it.
+            j = int(np.searchsorted(r_edges, surface_radius, 'right')) - 1
+            if not 0 <= j < len(r):
+                raise ValueError(
+                    f"r = {surface_radius:g} lies outside the dumped shells, whose "
+                    f"cells span [{r_edges[0]:g}, {r_edges[-1]:g})."
+                )
             i_r = slice(j, j + 1)
             lo, hi = tensor_cell_bounds(cth_edges, ph_edges)
-            r_used = float(r[j])
+            r_sample = float(r[j])
 
         keys = (self.mass_density.density_keys if surface_radius is None
                 else self.mass_density.flux_keys)
@@ -587,8 +598,8 @@ class AthenaKFileHandler(FileHandler):
             finally:
                 shm.close()
 
-        weights = self.cell_weights_from_values(lo, hi, values, surface_radius)
-        return lo, hi, weights, r_used
+        weights = self.cell_weights_from_values(lo, hi, values, r_sample)
+        return lo, hi, weights
 
     @staticmethod
     def load_step_to_memory(

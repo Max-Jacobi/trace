@@ -96,7 +96,7 @@ class ReducedSurfaceFileHandler(FileHandler):
         self,
         slot: int,
         surface_radius: float | None = None,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
@@ -120,17 +120,28 @@ class ReducedSurfaceFileHandler(FileHandler):
         cth_edges = np.concatenate((np.cos(th - dth / 2), [np.cos(th[-1] + dth / 2)]))
         ph_edges = np.concatenate((ph - dph / 2, [ph[-1] + dph / 2]))
 
+        q = float(r[1] / r[0])              # constant, the grid is geometric
+        r_edges = np.concatenate((r / np.sqrt(q), [r[-1] * np.sqrt(q)]))
+
         if surface_radius is None:
-            q = float(r[1] / r[0])          # constant, the grid is geometric
-            r_edges = np.concatenate((r / np.sqrt(q), [r[-1] * np.sqrt(q)]))
             i_r = slice(None)
             lo, hi = tensor_cell_bounds(r_edges, cth_edges, ph_edges)
-            r_used = None
+            r_sample = None
         else:
-            j = int(np.argmin(np.abs(r - surface_radius)))
+            # The shell whose cell the sphere passes through, half-open so a
+            # sphere on a face takes exactly one. Not the nearest shell: the
+            # sphere stays at exactly the radius asked for, so it is the outer
+            # boundary of a volume seeded to the same radius, and this shell's
+            # value stands for the flux through it.
+            j = int(np.searchsorted(r_edges, surface_radius, 'right')) - 1
+            if not 0 <= j < len(r):
+                raise ValueError(
+                    f"r = {surface_radius:g} lies outside the dumped shells, whose "
+                    f"cells span [{r_edges[0]:g}, {r_edges[-1]:g})."
+                )
             i_r = slice(j, j + 1)
             lo, hi = tensor_cell_bounds(cth_edges, ph_edges)
-            r_used = float(r[j])
+            r_sample = float(r[j])
 
         keys = (self.mass_density.density_keys if surface_radius is None
                 else self.mass_density.flux_keys)
@@ -143,8 +154,8 @@ class ReducedSurfaceFileHandler(FileHandler):
             finally:
                 shm.close()
 
-        weights = self.cell_weights_from_values(lo, hi, values, surface_radius)
-        return lo, hi, weights, r_used
+        weights = self.cell_weights_from_values(lo, hi, values, r_sample)
+        return lo, hi, weights
 
     @staticmethod
     def load_step_to_memory(

@@ -122,14 +122,13 @@ class _Bounds:
 
     grid_geometry = 'spherical'
 
-    def __init__(self, lo, hi, weights=None, r_used=None):
+    def __init__(self, lo, hi, weights=None):
         self.lo, self.hi = np.asarray(lo, float), np.asarray(hi, float)
-        self.weights = (np.zeros(self.lo.shape[1]) if weights is None
+        self.weights = (np.ones(self.lo.shape[1]) if weights is None
                         else np.asarray(weights, float))
-        self.r_used = r_used
 
     def native_cell_weights(self, slot, surface_radius=None):
-        return self.lo, self.hi, self.weights, self.r_used
+        return self.lo, self.hi, self.weights
 
 
 class TestRegionRestriction:
@@ -146,7 +145,7 @@ class TestRegionRestriction:
         hi = np.array([[1.0, 2.0, 3.0, 4.0], [1.0] * 4, [2 * np.pi] * 4])
         return _Bounds(lo, hi, weights=np.arange(4.0))
 
-    def test_selects_cells_by_centre(self):
+    def test_cells_inside_are_kept_whole(self):
         cells, weights = _native_cells(
             self._radial_cells(), 0,
             ranges=((1.0, 3.0), (-1.0, 1.0), (0.0, 2 * np.pi)))
@@ -170,19 +169,75 @@ class TestRegionRestriction:
             _native_cells(self._radial_cells(), 0,
                           ranges=((10.0, 20.0), (-1.0, 1.0), (0.0, 2 * np.pi)))
 
-    def test_an_unsnapped_radius_stays_the_one_that_was_asked_for(self):
+    def test_a_surface_stays_at_the_radius_asked_for(self):
+        """Nothing is snapped: the sphere is exactly the one requested."""
         lo = np.array([[-1.0], [0.0]])
         hi = np.array([[1.0], [2 * np.pi]])
         cells, _ = _native_cells(_Bounds(lo, hi), 0,
                                  ranges=((-1.0, 1.0), (0.0, 2 * np.pi)), r_surf=7.0)
         assert cells.r_surf == 7.0
 
-    def test_a_snapped_radius_overrides_it(self):
+
+class TestExactLimits:
+    """
+    A limit that passes through a cell cuts it there, and the cell keeps the
+    fraction of its mass that lies inside. This is what makes the edge of the
+    seeded region the limit itself rather than the nearest cell face -- and so
+    what lets a volume seeded to R and a surface at R share one boundary.
+    """
+
+    @staticmethod
+    def _shell(weight=7.0):
+        # one radial cell [1, 2] covering the whole sphere
+        lo = np.array([[1.0], [-1.0], [0.0]])
+        hi = np.array([[2.0], [1.0], [2 * np.pi]])
+        return _Bounds(lo, hi, weights=[weight])
+
+    def test_a_radial_cut_keeps_the_r_cubed_fraction(self):
+        cells, w = _native_cells(self._shell(), 0,
+                                 ranges=((1.0, 1.5), (-1.0, 1.0), (0.0, 2 * np.pi)))
+        assert cells.hi[0, 0] == 1.5
+        assert w[0] == pytest.approx(7.0 * (1.5**3 - 1.0) / (2.0**3 - 1.0))
+
+    def test_the_cut_mass_is_the_cut_measure_times_the_density(self):
+        """Constant density across the cell makes the rescaling exact."""
+        lo = np.array([[1.0], [-1.0], [0.0]])
+        hi = np.array([[2.0], [1.0], [2 * np.pi]])
+        rho = 3.0
+        full = _Cells(lo, hi).measure()[0]
+        cells, w = _native_cells(_Bounds(lo, hi, weights=[rho * full]), 0,
+                                 ranges=((1.2, 1.7), (-1.0, 1.0), (0.0, 2 * np.pi)))
+        assert w[0] == pytest.approx(rho * cells.measure()[0])
+
+    def test_angular_cuts_are_linear(self):
+        cells, w = _native_cells(self._shell(), 0,
+                                 ranges=((1.0, 2.0), (0.0, 1.0), (0.0, np.pi)))
+        # half the cos(theta) range, half the phi range
+        assert w[0] == pytest.approx(7.0 * 0.5 * 0.5)
+        assert (cells.lo[1, 0], cells.hi[1, 0]) == (0.0, 1.0)
+
+    def test_a_surface_cut_is_linear_in_cos_theta_not_cubic(self):
+        """On a surface the first axis is cos(theta); r is not there to cube."""
         lo = np.array([[-1.0], [0.0]])
         hi = np.array([[1.0], [2 * np.pi]])
-        cells, _ = _native_cells(_Bounds(lo, hi, r_used=6.5), 0,
-                                 ranges=((-1.0, 1.0), (0.0, 2 * np.pi)), r_surf=7.0)
-        assert cells.r_surf == 6.5
+        _, w = _native_cells(_Bounds(lo, hi, weights=[4.0]), 0,
+                             ranges=((0.0, 1.0), (0.0, 2 * np.pi)), r_surf=7.0)
+        assert w[0] == pytest.approx(2.0)
+
+    def test_draws_land_inside_the_cut(self):
+        cells, _ = _native_cells(self._shell(), 0,
+                                 ranges=((1.0, 1.5), (-1.0, 1.0), (0.0, 2 * np.pi)))
+        u = np.random.default_rng(0).uniform(size=(3, 5000))
+        pos = cells.sample_positions(np.zeros(5000, dtype=int), u)
+        r = np.linalg.norm(pos, axis=0)
+        assert r.min() >= 1.0 - 1e-12
+        assert r.max() <= 1.5 + 1e-12
+
+    def test_a_cell_touching_the_limit_from_outside_is_dropped(self):
+        """Zero measure inside is not a cell to sample from."""
+        with pytest.raises(ValueError, match="No native cell"):
+            _native_cells(self._shell(), 0,
+                          ranges=((2.0, 3.0), (-1.0, 1.0), (0.0, 2 * np.pi)))
 
 
 class TestCellPlacement:
