@@ -38,7 +38,7 @@ from multiprocessing.shared_memory import SharedMemory
 import numpy as np
 
 from .file import FileHandler
-from .utils import fill_spherical_ghosts, glob_files
+from .utils import fill_spherical_ghosts, glob_files, tensor_cell_bounds
 from .interpolators.base import InterpolatorBase
 from .interpolators.coordinate_transformations import CartesianToSpherical
 
@@ -527,7 +527,7 @@ class AthenaKFileHandler(FileHandler):
         slot: int,
         keys: tuple[str, ...],
         surface_radius: float | None = None,
-        ) -> tuple[list[tuple[tuple[np.ndarray, ...], np.ndarray]], float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
@@ -543,9 +543,8 @@ class AthenaKFileHandler(FileHandler):
           poles, where the cell is a half cell. Clipping the edges to the
           physical range handles that on its own.
 
-        The returned ``cos(theta)`` edges are monotone but may ascend or
-        descend, depending on the convention; callers must not assume a
-        direction.
+        Which way the polar axis runs therefore depends on the convention, but
+        that stops here: ``tensor_cell_bounds`` sorts each cell's pair.
         """
         ng = self.n_ghosts
         r = np.asarray(self.extra_data['r'], dtype=float)
@@ -569,17 +568,15 @@ class AthenaKFileHandler(FileHandler):
             r_edges = np.exp(np.concatenate((
                 [2 * ln_r[0] - mid[0]], mid, [2 * ln_r[-1] - mid[-1]])))
             i_r = slice(None)
-            edges: tuple[np.ndarray, ...] = (r_edges, cth_edges, ph_edges)
+            lo, hi = tensor_cell_bounds(r_edges, cth_edges, ph_edges)
             r_used = None
-            n_r_sel = len(r)
         else:
             j = int(np.argmin(np.abs(r - surface_radius)))
             i_r = slice(j, j + 1)
-            edges = (cth_edges, ph_edges)
+            lo, hi = tensor_cell_bounds(cth_edges, ph_edges)
             r_used = float(r[j])
-            n_r_sel = 1
 
-        values = np.empty((len(keys), n_r_sel * (len(cth_edges) - 1) * len(ph)))
+        values = np.empty((len(keys), lo.shape[1]))
         for i_k, key in enumerate(keys):
             shm = SharedMemory(name=self.shared_memory[slot][key])
             try:
@@ -588,8 +585,7 @@ class AthenaKFileHandler(FileHandler):
             finally:
                 shm.close()
 
-        # One global grid, so a single block.
-        return [(edges, values)], r_used
+        return lo, hi, values, r_used
 
     @staticmethod
     def load_step_to_memory(

@@ -310,3 +310,23 @@ def densitization_factor(r, u_t, adm_mass: float):
     psi = 1.0 + adm_mass / (2.0 * r)
     factor = -np.asarray(u_t, dtype=float) * psi ** 7 / (1.0 - adm_mass / (2.0 * r))
     return factor if factor.ndim else float(factor)
+
+
+def tensor_cell_bounds(*edges: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Flat per-cell coordinate bounds for one separable grid.
+
+    ``edges`` gives the cell faces along each axis. The result is the
+    ``(lo, hi)`` pair of ``(D, n_cells)`` arrays that
+    :meth:`~src.file.FileHandler.native_cell_weights` is defined in terms of,
+    C-ordered over the axes so it lines up with a C-ordered value array.
+
+    Bounds come back sorted per cell, so an axis whose faces descend --
+    ``cos(theta)`` on an equal-solid-angle grid -- needs no special case here
+    or in the caller.
+    """
+    lo = np.array([a.ravel() for a in
+                   np.meshgrid(*(e[:-1] for e in edges), indexing='ij')])
+    hi = np.array([a.ravel() for a in
+                   np.meshgrid(*(e[1:] for e in edges), indexing='ij')])
+    return np.minimum(lo, hi), np.maximum(lo, hi)

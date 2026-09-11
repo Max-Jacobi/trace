@@ -10,7 +10,8 @@ import numpy as np
 import pytest
 
 from src.file import FileHandler
-from src.seeds import _CellSet, _axis_keep, _resolve_weight_grid
+from src.seeds import _Cells, _native_cells, _resolve_weight_grid
+from src.utils import tensor_cell_bounds
 
 
 class _NoHook:
@@ -59,59 +60,122 @@ class TestWeightGridResolution:
         assert _resolve_weight_grid(_Bare.__new__(_Bare), 'auto') is False
 
 
-class TestAxisKeep:
-    def test_selects_cells_by_centre(self):
-        edges = np.array([0.0, 1.0, 2.0, 3.0, 4.0])   # centres 0.5 1.5 2.5 3.5
-        assert _axis_keep(edges, 1.0, 3.0) == slice(1, 3)
+class _Bounds:
+    """A handler whose cells are handed over one by one, as the contract asks."""
 
-    def test_handles_a_descending_axis(self):
-        """cos(theta) runs downward; the range must still be found."""
-        edges = np.array([1.0, 0.5, 0.0, -0.5, -1.0])  # centres .75 .25 -.25 -.75
-        assert _axis_keep(edges, -0.5, 0.5) == slice(1, 3)
+    def __init__(self, lo, hi, values=None, r_used=None):
+        self.lo, self.hi = np.asarray(lo, float), np.asarray(hi, float)
+        self.values = (np.zeros((1, self.lo.shape[1])) if values is None
+                       else np.asarray(values, float))
+        self.r_used = r_used
 
-    def test_reports_no_overlap_rather_than_raising(self):
-        """
-        Once cells arrive in blocks, an axis that does not reach the requested
-        range is ordinary -- a block off to the side of the seeding region
-        contributes nothing. Raising here would make that an error.
-        """
-        edges = np.array([0.0, 1.0, 2.0])
-        assert _axis_keep(edges, 1.01, 1.02) is None
-        assert _axis_keep(edges, 5.0, 6.0) is None
+    def native_cell_weights(self, slot, keys, surface_radius=None):
+        return self.lo, self.hi, self.values, self.r_used
 
 
-class TestCellSetIndexing:
+class TestRegionRestriction:
     """
-    The flat index has to resolve to the right cell of the right block. This
-    is the part no measure-sum test can catch: getting it wrong scatters
-    tracers into the wrong block while every total stays correct.
+    Cells are kept by their centre, one flat mask over the lot. There is no
+    block structure left to get wrong, but the axis order and the direction an
+    axis runs in still are.
     """
 
     @staticmethod
-    def _two_blocks():
-        # adjacent radial blocks, [1,2] and [2,4], one cell each in angle
-        cth = np.array([1.0, -1.0])
-        ph = np.array([0.0, 2 * np.pi])
-        return _CellSet([(np.array([1.0, 2.0]), cth, ph),
-                         (np.array([2.0, 4.0]), cth, ph)])
+    def _radial_cells():
+        # four radial cells [0,1] [1,2] [2,3] [3,4], one cell each in angle
+        lo = np.array([[0.0, 1.0, 2.0, 3.0], [-1.0] * 4, [0.0] * 4])
+        hi = np.array([[1.0, 2.0, 3.0, 4.0], [1.0] * 4, [2 * np.pi] * 4])
+        return _Bounds(lo, hi, values=np.arange(4.0)[None, :])
 
-    def test_offsets_span_every_block(self):
-        cells = self._two_blocks()
+    def test_selects_cells_by_centre(self):
+        cells, vals = _native_cells(
+            self._radial_cells(), 0, ('rho',),
+            ranges=((1.0, 3.0), (-1.0, 1.0), (0.0, 2 * np.pi)))
         assert cells.n_cells == 2
-        assert cells.measure().shape == (2,)
+        # centres 1.5 and 2.5, i.e. the middle two cells and their values
+        assert vals[0].tolist() == [1.0, 2.0]
 
-    def test_each_index_lands_in_its_own_block(self):
-        cells = self._two_blocks()
-        u = np.full((3, 2), 0.5)
-        pos = cells.sample_positions(np.array([0, 1]), u)
-        r = np.sqrt((pos ** 2).sum(axis=0))
-        assert 1.0 <= r[0] <= 2.0
-        assert 2.0 <= r[1] <= 4.0
+    def test_handles_a_descending_axis(self):
+        """
+        The requested range is given low-to-high while cos(theta) may run
+        either way; comparing on the centres is what makes both work.
+        """
+        lo = np.array([[1.0] * 4, [0.5, 0.0, -0.5, -1.0], [0.0] * 4])
+        hi = np.array([[2.0] * 4, [1.0, 0.5, 0.0, -0.5], [1.0] * 4])
+        cells, _ = _native_cells(_Bounds(lo, hi), 0, ('rho',),
+                                 ranges=((1.0, 2.0), (-0.5, 0.5), (0.0, 1.0)))
+        assert cells.n_cells == 2
 
-    def test_draws_stay_inside_their_cell_at_both_extremes(self):
-        cells = self._two_blocks()
-        for frac in (0.0, 1.0):
+    def test_an_empty_region_is_an_error_the_user_can_act_on(self):
+        with pytest.raises(ValueError, match="No native cell"):
+            _native_cells(self._radial_cells(), 0, ('rho',),
+                          ranges=((10.0, 20.0), (-1.0, 1.0), (0.0, 2 * np.pi)))
+
+    def test_an_unsnapped_radius_stays_the_one_that_was_asked_for(self):
+        lo = np.array([[-1.0], [0.0]])
+        hi = np.array([[1.0], [2 * np.pi]])
+        cells, _ = _native_cells(_Bounds(lo, hi), 0, ('rho',),
+                                 ranges=((-1.0, 1.0), (0.0, 2 * np.pi)), r_surf=7.0)
+        assert cells.r_surf == 7.0
+
+    def test_a_snapped_radius_overrides_it(self):
+        lo = np.array([[-1.0], [0.0]])
+        hi = np.array([[1.0], [2 * np.pi]])
+        cells, _ = _native_cells(_Bounds(lo, hi, r_used=6.5), 0, ('rho',),
+                                 ranges=((-1.0, 1.0), (0.0, 2 * np.pi)), r_surf=7.0)
+        assert cells.r_surf == 6.5
+
+
+class TestCellPlacement:
+    """
+    Every tracer must land inside the cell it was drawn from. Cells of
+    different sizes sitting next to each other is the case that catches a
+    bounds mixup: the totals stay right either way, the positions do not.
+    """
+
+    @staticmethod
+    def _uneven():
+        # adjacent radial cells [1,2] and [2,4], one cell each in angle
+        lo = np.array([[1.0, 2.0], [-1.0, -1.0], [0.0, 0.0]])
+        hi = np.array([[2.0, 4.0], [1.0, 1.0], [2 * np.pi, 2 * np.pi]])
+        return _Cells(lo, hi)
+
+    def test_measure_is_per_cell(self):
+        cells = self._uneven()
+        assert cells.n_cells == 2
+        want = 4 * np.pi / 3 * np.array([2.0 ** 3 - 1.0, 4.0 ** 3 - 2.0 ** 3])
+        assert cells.measure() == pytest.approx(want)
+
+    def test_each_draw_stays_inside_its_own_cell(self):
+        cells = self._uneven()
+        for frac in (0.0, 0.5, 1.0):
             pos = cells.sample_positions(np.array([0, 1]), np.full((3, 2), frac))
             r = np.sqrt((pos ** 2).sum(axis=0))
-            assert 1.0 <= r[0] <= 2.0 + 1e-12
-            assert 2.0 <= r[1] <= 4.0 + 1e-12
+            assert 1.0 - 1e-12 <= r[0] <= 2.0 + 1e-12
+            assert 2.0 - 1e-12 <= r[1] <= 4.0 + 1e-12
+
+    def test_a_surface_cell_set_sits_at_its_radius(self):
+        lo = np.array([[-1.0], [0.0]])
+        hi = np.array([[1.0], [2 * np.pi]])
+        cells = _Cells(lo, hi, r_surf=3.0)
+        assert cells.measure() == pytest.approx([4 * np.pi * 9.0])
+        pos = cells.sample_positions(np.array([0]), np.full((2, 1), 0.5))
+        assert np.sqrt((pos ** 2).sum(axis=0))[0] == pytest.approx(3.0)
+
+
+class TestTensorCellBounds:
+    def test_a_separable_grid_flattens_c_ordered(self):
+        lo, hi = tensor_cell_bounds(np.array([0.0, 1.0, 2.0]),
+                                    np.array([0.0, 10.0]))
+        assert lo.shape == (2, 2)
+        assert lo[0].tolist() == [0.0, 1.0]
+        assert hi[0].tolist() == [1.0, 2.0]
+
+    def test_a_descending_axis_comes_back_sorted(self):
+        """
+        AthenaK's cos(theta) runs downward. Sorting here is what lets every
+        caller write hi - lo without an abs.
+        """
+        lo, hi = tensor_cell_bounds(np.array([1.0, 0.0, -1.0]))
+        assert np.all(hi >= lo)
+        assert lo[0].tolist() == [0.0, -1.0]

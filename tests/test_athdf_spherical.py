@@ -464,10 +464,10 @@ class TestNativeCellWeights:
     """
     The native weight grid for the mass-weighted seeding modes.
 
-    Meshblocks are the reason the hook returns a list rather than one grid, so
-    the tests that matter are about the blocks together covering the region
-    exactly once. Getting edges or ghosts wrong scales every sampled mass by
-    the same factor, and no downstream check would notice.
+    Meshblocks arrive flattened into one list of cells, so the tests that
+    matter are about those cells covering the region exactly once. Getting
+    bounds or ghosts wrong scales every sampled mass by the same factor, and
+    no downstream check would notice.
     """
 
     R_LIM = (10.0, 50.0)
@@ -486,28 +486,26 @@ class TestNativeCellWeights:
         return fh
 
     @staticmethod
-    def _volume(blocks):
-        total = 0.0
-        for (r_e, c_e, p_e), _ in blocks:
-            total += float(((np.diff(r_e ** 3) / 3)[:, None, None]
-                            * np.abs(np.diff(c_e))[None, :, None]
-                            * np.diff(p_e)[None, None, :]).sum())
-        return total
+    def _volume(lo, hi):
+        return float((((hi[0] ** 3 - lo[0] ** 3) / 3)
+                      * (hi[1] - lo[1]) * (hi[2] - lo[2])).sum())
 
     def test_cells_tile_the_domain_volume(self, tmp_path):
         """
-        The blocks together must fill the shell exactly once. Tolerance is
+        The cells together must fill the shell exactly once. Tolerance is
         1e-6, not machine epsilon: the writer stores faces as float32, as real
         Athena++ dumps do, so faces shared between blocks telescope only to
         float32 precision.
         """
         fh = self._loaded(tmp_path)
         try:
-            blocks, r_used = fh.native_cell_weights(0, ("rho",))
+            lo, hi, vals, r_used = fh.native_cell_weights(0, ("rho",))
             assert r_used is None
+            assert lo.shape == hi.shape == (3, vals.shape[1])
+            assert np.all(hi >= lo)
             r_lo, r_hi = self.R_LIM
             exact = 4 * np.pi * (r_hi ** 3 - r_lo ** 3) / 3
-            assert self._volume(blocks) == pytest.approx(exact, rel=1e-6)
+            assert self._volume(lo, hi) == pytest.approx(exact, rel=1e-6)
         finally:
             fh.free_shared_memory()
 
@@ -520,31 +518,28 @@ class TestNativeCellWeights:
         levels, locs = TestOctree()._amr_layout()
         fh = self._loaded(tmp_path, levels=levels, locations=locs)
         try:
-            blocks, _ = fh.native_cell_weights(0, ("rho",))
-            assert len(blocks) == 15          # 7 coarse + 8 refined children
+            lo, hi, vals, _ = fh.native_cell_weights(0, ("rho",))
+            # 7 coarse blocks plus 8 refined children, all of interior size
+            assert vals.shape[1] == 15 * int(np.prod(self.INTERIOR))
             r_lo, r_hi = self.R_LIM
             exact = 4 * np.pi * (r_hi ** 3 - r_lo ** 3) / 3
-            assert self._volume(blocks) == pytest.approx(exact, rel=1e-6)
+            assert self._volume(lo, hi) == pytest.approx(exact, rel=1e-6)
         finally:
             fh.free_shared_memory()
 
     def test_ghost_cells_are_excluded(self, tmp_path):
         """
-        A leaked ghost layer pushes a block's faces outside the domain, so the
-        global min/max radius is the sharpest single signal for it.
+        A leaked ghost layer pushes cells outside the domain, so the global
+        min/max radius is the sharpest single signal for it, and the cell
+        count is the other half of the same check.
         """
         fh = self._loaded(tmp_path)
         try:
-            blocks, _ = fh.native_cell_weights(0, ("rho",))
-            n_int = int(np.prod(self.INTERIOR))
-            assert sum(v.shape[1] for _, v in blocks) == len(blocks) * n_int
-            for (r_e, c_e, p_e), vals in blocks:
-                assert (len(r_e) - 1, len(c_e) - 1, len(p_e) - 1) == self.INTERIOR
-                assert vals.shape == (1, n_int)
-            r_all = np.concatenate([e[0] for e, _ in blocks])
-            assert r_all.min() == pytest.approx(self.R_LIM[0], rel=1e-6)
-            assert np.concatenate([e[0] for e, _ in blocks]).max() \
-                == pytest.approx(self.R_LIM[1], rel=1e-6)
+            lo, hi, vals, _ = fh.native_cell_weights(0, ("rho",))
+            n_blocks = fh.extra_data['shape'][0]
+            assert vals.shape == (1, n_blocks * int(np.prod(self.INTERIOR)))
+            assert lo[0].min() == pytest.approx(self.R_LIM[0], rel=1e-6)
+            assert hi[0].max() == pytest.approx(self.R_LIM[1], rel=1e-6)
         finally:
             fh.free_shared_memory()
 
@@ -557,15 +552,11 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            blocks, r_used = fh.native_cell_weights(0, ("rho",), surface_radius=r_surf)
+            lo, hi, vals, r_used = fh.native_cell_weights(
+                0, ("rho",), surface_radius=r_surf)
             assert r_used is None            # nothing was snapped
-            solid = 0.0
-            for edges, vals in blocks:
-                assert len(edges) == 2       # (cos theta, phi) only
-                c_e, p_e = edges
-                assert vals.shape == (1, (len(c_e) - 1) * (len(p_e) - 1))
-                solid += float((np.abs(np.diff(c_e))[:, None]
-                                * np.diff(p_e)[None, :]).sum())
+            assert lo.shape == hi.shape == (2, vals.shape[1])
+            solid = float(((hi[0] - lo[0]) * (hi[1] - lo[1])).sum())
             assert solid == pytest.approx(4 * np.pi, rel=1e-6)
         finally:
             fh.free_shared_memory()
@@ -577,7 +568,7 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            blocks, _ = fh.native_cell_weights(0, ("rho",))
+            _, _, vals, _ = fh.native_cell_weights(0, ("rho",))
             ng = fh.extra_data['file_ng']
             b, i, j, k = 3, 1, 2, 0
             r_c = fh.extra_data['x1v'][b, ng + i]
@@ -591,7 +582,7 @@ class TestNativeCellWeights:
                 want = float(interp(pos)[0][0])
             finally:
                 interp.unload()
-            got = blocks[b][1][0].reshape(self.INTERIOR)[i, j, k]
+            got = vals[0].reshape(-1, *self.INTERIOR)[b, i, j, k]
             assert got == pytest.approx(want, rel=1e-6)
         finally:
             fh.free_shared_memory()
@@ -605,9 +596,12 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path)
         try:
-            blocks, _ = fh.native_cell_weights(0, ("rho",), surface_radius=r_surf)
+            _, _, vals, _ = fh.native_cell_weights(
+                0, ("rho",), surface_radius=r_surf)
             ng = fh.extra_data['file_ng']
             x1f, x1v = fh.extra_data['x1f'], fh.extra_data['x1v']
+            i2, i3 = self.INTERIOR[1], self.INTERIOR[2]
+            patches = vals[0].reshape(-1, i2, i3)
             interp = fh.setup_interpolators(fh.keys, fh.shared_memory,
                                             fh.extra_data)[0]
             interp.load()
@@ -620,18 +614,16 @@ class TestNativeCellWeights:
                     i_r = int(np.searchsorted(r_e, r_surf, 'right')) - 1
                     # the chosen cell must actually straddle the sphere
                     assert r_e[i_r] <= r_surf < r_e[i_r + 1]
-                    c_e, p_e = blocks[checked][0]
-                    vals = blocks[checked][1][0].reshape(len(c_e) - 1, len(p_e) - 1)
                     j, k = 1, 2
                     pos = np.array(sph_to_cart(
                         x1v[b, ng + i_r],
                         fh.extra_data['x2v'][b, ng + j],
                         fh.extra_data['x3v'][b, ng + k],
                     )).reshape(3, 1)
-                    assert vals[j, k] == pytest.approx(float(interp(pos)[0][0]),
-                                                       rel=1e-6)
+                    assert patches[checked][j, k] == pytest.approx(
+                        float(interp(pos)[0][0]), rel=1e-6)
                     checked += 1
-                assert checked == len(blocks) > 0
+                assert checked == len(patches) > 0
             finally:
                 interp.unload()
         finally:

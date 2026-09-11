@@ -7,7 +7,7 @@ from multiprocessing import Pool
 from .tracers import Tracers
 from .integrators import IntegratorBase
 from .file import FileHandler
-from .utils import do_parallel_star_pool, densitization_factor
+from .utils import do_parallel_star_pool, densitization_factor, tensor_cell_bounds
 
 
 # ---------------------------------------------------------------------------
@@ -653,160 +653,120 @@ def _sample_cells(
     return idx, np.sign(weights[idx]), total
 
 
-def _axis_keep(edges: np.ndarray, lo: float, hi: float) -> slice | None:
+def _sph_to_cart(r, cos_theta, phi):
+    """Cartesian coordinates from (r, cos(theta), phi), any of them arrays."""
+    sin_theta = np.sqrt(np.clip(1 - np.asarray(cos_theta)**2, 0.0, None))
+    return np.array([r * sin_theta * np.cos(phi),
+                     r * sin_theta * np.sin(phi),
+                     r * cos_theta])
+
+
+class _Cells:
     """
-    Cells of `edges` whose centre lies in [lo, hi], as a contiguous slice, or
-    None if the axis does not reach that range at all.
+    A flat set of spherical cells, each given by its own coordinate bounds.
 
-    `edges` may run either way; the comparison is on the centres so a
-    descending cos(theta) axis needs no special case. Returning None rather
-    than raising matters once cells arrive in blocks: a block lying wholly
-    outside the requested region is ordinary, not an error.
-    """
-    centres = (edges[:-1] + edges[1:]) / 2
-    keep = np.flatnonzero((centres >= min(lo, hi)) & (centres <= max(lo, hi)))
-    if keep.size == 0:
-        return None
-    return slice(int(keep[0]), int(keep[-1]) + 1)
-
-
-class _CellSet:
-    """
-    A flat set of cells assembled from one or more separable blocks.
-
-    A format with one global grid contributes a single block, and so does the
-    interpolated helper grid, so the sampling, the measure and the in-cell
-    placement below are written once and serve every path. Blocks are assumed
-    to tile without overlapping; that is the hook's contract, and it is what
-    stops a cell's mass being counted twice.
-
-    Cells are indexed by one flat integer running block by block, so a drawn
-    index is resolved by finding its block and unravelling the remainder with
-    that block's own shape.
+    ``lo`` and ``hi`` are ``(D, n_cells)``: the two bounds of every cell along
+    every axis, ``(r, cos(theta), phi)`` for a volume and ``(cos(theta), phi)``
+    on the sphere at ``r_surf``. Nothing here knows how the cells are arranged,
+    so one global grid, a union of meshblocks and an AMR hierarchy are all the
+    same object, and so is the interpolated helper grid. Cells are assumed not
+    to overlap; that is the hook's contract, and it is what stops a cell's mass
+    being counted twice.
     """
 
-    def __init__(self, blocks: list[tuple[np.ndarray, ...]], r_surf: float | None = None):
-        if not blocks:
+    def __init__(self, lo, hi, r_surf: float | None = None, label: str | None = None):
+        self.lo = np.asarray(lo, dtype=float)
+        self.hi = np.asarray(hi, dtype=float)
+        if self.lo.shape != self.hi.shape:
+            raise ValueError(
+                f"Cell bounds disagree in shape: {self.lo.shape} against {self.hi.shape}."
+            )
+        if self.lo.shape[1] == 0:
             raise ValueError("No cells to sample from in the requested region.")
-        self.blocks = blocks
         self.r_surf = r_surf
-        self.shapes = [tuple(len(e) - 1 for e in edges) for edges in blocks]
-        sizes = [int(np.prod(sh)) for sh in self.shapes]
-        self.offsets = np.concatenate(([0], np.cumsum(sizes))).astype(np.int64)
+        self.label = label
 
     @property
     def n_cells(self) -> int:
-        return int(self.offsets[-1])
+        return self.lo.shape[1]
 
     def measure(self) -> np.ndarray:
-        """Cell volume, or cell area at ``r_surf``, flat over all blocks."""
-        out = []
-        for edges in self.blocks:
-            if self.r_surf is None:
-                r_e, cth_e, ph_e = edges
-                m = ((np.diff(r_e**3) / 3)[:, None, None]
-                     * np.abs(np.diff(cth_e))[None, :, None]
-                     * np.diff(ph_e)[None, None, :])
-            else:
-                cth_e, ph_e = edges
-                m = (self.r_surf**2
-                     * np.abs(np.diff(cth_e))[:, None]
-                     * np.diff(ph_e)[None, :])
-            out.append(m.ravel())
-        return np.concatenate(out)
+        """Cell volume, or cell area at ``r_surf``."""
+        d_ang = ((self.hi[-2] - self.lo[-2]) * (self.hi[-1] - self.lo[-1]))
+        if self.r_surf is not None:
+            return self.r_surf**2 * d_ang
+        return (self.hi[0]**3 - self.lo[0]**3) / 3 * d_ang
 
     def centres(self) -> np.ndarray:
         """Cartesian cell centres, shape (3, n_cells)."""
-        out = []
-        for edges in self.blocks:
-            if self.r_surf is None:
-                r_e, cth_e, ph_e = edges
-                # See the note below on why r uses the arithmetic midpoint.
-                r_c = (r_e[:-1] + r_e[1:]) / 2
-            else:
-                cth_e, ph_e = edges
-                r_c = np.array([self.r_surf])
-            th_c = np.arccos(np.clip((cth_e[:-1] + cth_e[1:]) / 2, -1.0, 1.0))
-            ph_c = (ph_e[:-1] + ph_e[1:]) / 2
-            r_g, th_g, ph_g = np.meshgrid(r_c, th_c, ph_c, indexing='ij')
-            out.append(np.array([
-                (r_g * np.sin(th_g) * np.cos(ph_g)).ravel(),
-                (r_g * np.sin(th_g) * np.sin(ph_g)).ravel(),
-                (r_g * np.cos(th_g)).ravel(),
-            ]))
-        return np.concatenate(out, axis=1)
+        # cos(theta) and phi take the midpoint of the measure dV is written in.
+        # The radial one deliberately does NOT: it is the arithmetic midpoint
+        # in r, not the midpoint of r**3.
+        #
+        # The formally consistent choice would be ((r_lo**3 + r_hi**3)/2)**(1/3),
+        # exact for constant rho. But a radial grid is geometric precisely
+        # because the ejecta falls off roughly as rho ~ r**-3, and expanding
+        # both rules about a cell of ratio 1+e against the exact ln(r_hi/r_lo):
+        #
+        #   arithmetic midpoint : e - e**2/2 + e**3/3        (the exact series)
+        #   r**3      midpoint : e - e**2/2 - 0.42 e**3
+        #
+        # so the arithmetic one is third-order accurate on that profile while
+        # the measure-consistent one is not. Measured on an analytic rho = r**-3
+        # shell (tests/test_seeds_mc.py) the r**3 midpoint comes out 0.98% low;
+        # the arithmetic one is within 0.1%. Do not "fix" this without rerunning
+        # that test.
+        r = self.r_surf if self.r_surf is not None else (self.lo[0] + self.hi[0]) / 2
+        return _sph_to_cart(r,
+                            (self.lo[-2] + self.hi[-2]) / 2,
+                            (self.lo[-1] + self.hi[-1]) / 2)
 
     def sample_positions(self, idx: np.ndarray, u: np.ndarray) -> np.ndarray:
         """
-        Cartesian positions for the drawn cells `idx`, placed inside their own
-        cell by the uniform deviates `u` (shape (D, len(idx))).
-
-        Bounds are resolved only for the cells actually drawn. With ~1e4
-        tracers against ~1e7 cells that is the difference between a loop over a
-        few hundred blocks and materialising six arrays the size of the grid.
+        Cartesian positions for the drawn cells ``idx``, placed inside their
+        own cell by the uniform deviates ``u`` (shape ``(D, len(idx))``).
         """
-        idx = np.asarray(idx)
-        b_of = np.searchsorted(self.offsets, idx, side='right') - 1
-        local = idx - self.offsets[b_of]
-
-        r_s = np.empty(idx.size)
-        cth_s = np.empty(idx.size)
-        ph_s = np.empty(idx.size)
-        for b in np.unique(b_of):
-            sel = b_of == b
-            edges = self.blocks[b]
-            if self.r_surf is None:
-                r_e, cth_e, ph_e = edges
-                i_r, i_th, i_ph = np.unravel_index(local[sel], self.shapes[b])
-                # Uniform in r**3, so uniform in volume rather than in radius.
-                r_s[sel] = (r_e[i_r]**3 + u[0, sel] * np.diff(r_e**3)[i_r]) ** (1 / 3)
-            else:
-                cth_e, ph_e = edges
-                i_th, i_ph = np.unravel_index(local[sel], self.shapes[b])
-                r_s[sel] = self.r_surf
-            cth_s[sel] = cth_e[i_th] + u[-2, sel] * np.diff(cth_e)[i_th]
-            ph_s[sel] = ph_e[i_ph] + u[-1, sel] * np.diff(ph_e)[i_ph]
-
-        sth_s = np.sqrt(np.clip(1 - cth_s**2, 0.0, None))
-        return np.array([
-            r_s * sth_s * np.cos(ph_s),
-            r_s * sth_s * np.sin(ph_s),
-            r_s * cth_s,
-        ])
+        lo, hi = self.lo[:, idx], self.hi[:, idx]
+        if self.r_surf is not None:
+            r = self.r_surf
+        else:
+            # Uniform in r**3, so uniform in volume rather than in radius.
+            r = (lo[0]**3 + u[0] * (hi[0]**3 - lo[0]**3)) ** (1 / 3)
+        return _sph_to_cart(r,
+                            lo[-2] + u[-2] * (hi[-2] - lo[-2]),
+                            lo[-1] + u[-1] * (hi[-1] - lo[-1]))
 
     def describe(self) -> str:
-        if len(self.blocks) == 1:
-            return "x".join(str(n) for n in self.shapes[0])
-        return f"{self.n_cells} cells in {len(self.blocks)} blocks"
+        return self.label or f"{self.n_cells}-cell"
 
 
-def _native_cellset(file_handler, slot, keys, ranges, r_surf=None):
+def _grid_cells(*edges: np.ndarray, r_surf: float | None = None) -> _Cells:
+    """A ``_Cells`` over one separable grid, labelled by its shape."""
+    lo, hi = tensor_cell_bounds(*edges)
+    return _Cells(lo, hi, r_surf=r_surf,
+                  label="x".join(str(len(e) - 1) for e in edges))
+
+
+def _native_cells(file_handler, slot, keys, ranges, r_surf=None):
     """
-    Ask the format for its own cells and keep those inside `ranges`.
-
-    `ranges` is one (lo, hi) pair per axis of the returned edges. Blocks with
-    no cell in range drop out; if every block does, the region is empty and
-    _CellSet says so.
+    Ask the format for its own cells and keep those whose centre is in
+    ``ranges``, one ``(lo, hi)`` pair per axis of the returned bounds.
     """
-    blocks, r_used = file_handler.native_cell_weights(slot, keys, surface_radius=r_surf)
-    # None means the format did not snap: keep the radius the caller asked for.
-    if r_used is None:
-        r_used = r_surf
-    kept_edges, kept_vals = [], []
-    for edges, vals in blocks:
-        slices = [_axis_keep(e, *rng) for e, rng in zip(edges, ranges)]
-        if any(sl is None for sl in slices):
-            continue
-        shape = tuple(len(e) - 1 for e in edges)
-        sub = vals.reshape(len(keys), *shape)[(slice(None), *slices)]
-        kept_edges.append(tuple(e[sl.start:sl.stop + 1] for e, sl in zip(edges, slices)))
-        kept_vals.append(sub.reshape(len(keys), -1))
-    if not kept_edges:
+    lo, hi, vals, r_used = file_handler.native_cell_weights(
+        slot, keys, surface_radius=r_surf)
+    keep = np.ones(lo.shape[1], dtype=bool)
+    for axis, (a, b) in enumerate(ranges):
+        centre = (lo[axis] + hi[axis]) / 2
+        keep &= (centre >= min(a, b)) & (centre <= max(a, b))
+    if not keep.any():
         raise ValueError(
             "No native cell falls in the requested region; check --r-min/--r-max "
             "and the angular limits against the data's extent."
         )
-    return _CellSet(kept_edges, r_surf=r_used), np.concatenate(kept_vals, axis=1)
+    # None means the format did not snap: keep the radius the caller asked for.
+    cells = _Cells(lo[:, keep], hi[:, keep],
+                   r_surf=r_surf if r_used is None else r_used)
+    return cells, vals[:, keep]
 
 
 def _resolve_weight_grid(file_handler, weight_grid: str) -> bool:
@@ -902,7 +862,7 @@ def spherical_by_volume_mc(
     i_loc = int(np.argmin(np.abs(file_handler.cur_times - start_t)))
 
     if native:
-        cells, vals = _native_cellset(
+        cells, vals = _native_cells(
             file_handler, i_loc, needed_keys,
             ranges=((r_min, r_max),
                     (np.cos(theta_max), np.cos(theta_min)),
@@ -914,28 +874,11 @@ def spherical_by_volume_mc(
             cells_per_tracer * n_tracers,
             (np.log(r_max / r_min), theta_max - theta_min, phi_max - phi_min),
         )
-        cells = _CellSet([(
+        cells = _grid_cells(
             np.geomspace(r_min, r_max, n_r + 1),
             np.linspace(np.cos(theta_min), np.cos(theta_max), n_th + 1),
             np.linspace(phi_min, phi_max, n_ph + 1),
-        )])
-        # cos(theta) and phi cell centres are the midpoint of the measure dV is
-        # written in. The radial one deliberately is NOT: it is the arithmetic
-        # midpoint in r, not the midpoint of r**3.
-        #
-        # The formally consistent choice would be ((r_lo**3 + r_hi**3)/2)**(1/3),
-        # exact for constant rho. But this grid is geometric precisely because
-        # the ejecta falls off roughly as rho ~ r**-3, and expanding both rules
-        # about a cell of ratio 1+e against the exact ln(r_hi/r_lo) gives
-        #
-        #   arithmetic midpoint : e - e**2/2 + e**3/3        (the exact series)
-        #   r**3      midpoint : e - e**2/2 - 0.42 e**3
-        #
-        # so the arithmetic one is third-order accurate on that profile while
-        # the measure-consistent one is not. Measured on an analytic rho = r**-3
-        # shell (tests/test_seeds_mc.py) the r**3 midpoint comes out 0.98% low;
-        # the arithmetic one is within 0.1%. Do not "fix" this without rerunning
-        # that test.
+        )
         pos_c = cells.centres()
         interp = _sampling_interpolator(file_handler, i_loc, needed_keys)
         interp.load()
@@ -1048,7 +991,7 @@ def spherical_surface_mc(
         # layout; the values are re-read per time step below.
         i_probe = int(np.argmin(np.abs(np.asarray(file_handler.times) - t_start[0])))
         file_handler.load_chunk(i_probe, forward=True)
-        cells, _ = _native_cellset(
+        cells, _ = _native_cells(
             file_handler, 0, needed_keys, ranges, r_surf=r_surf)
         if not np.isclose(cells.r_surf, r_surf, rtol=1e-3):
             print(f"--r-surf {r_surf:g} snapped to the grid shell at {cells.r_surf:g}.")
@@ -1058,10 +1001,11 @@ def spherical_surface_mc(
             max(cells_per_tracer * n_tracers // n_t, 4),
             (theta_max - theta_min, phi_max - phi_min),
         )
-        cells = _CellSet([(
+        cells = _grid_cells(
             np.linspace(np.cos(theta_min), np.cos(theta_max), n_th + 1),
             np.linspace(phi_min, phi_max, n_ph + 1),
-        )], r_surf=r_surf)
+            r_surf=r_surf,
+        )
 
     dA = cells.measure()
     pos_c = cells.centres()
@@ -1083,7 +1027,7 @@ def spherical_surface_mc(
                 if len(i_t) == 0:
                     continue
                 if native:
-                    _, vals = _native_cellset(
+                    _, vals = _native_cells(
                         file_handler, i_loc, needed_keys, ranges, r_surf=r_surf)
                     if vals.shape[1] != n_cells:
                         raise ValueError(

@@ -432,7 +432,7 @@ build their sampling weights. Two ways to get it:
   run cannot silently change what it sampled.
 
 Every format shipped here implements it: `reduced_surface` and `athenak` hold
-one global grid, and `athdf_spherical` hands over one entry per meshblock. A
+one global grid, and `athdf_spherical` pools the cells of every meshblock. A
 format that cannot enumerate its cells falls back to `helper` under `auto`.
 
 `native` is both more accurate and **faster**, which is the opposite of what
@@ -457,8 +457,9 @@ features, not a smoother `mdot`.
 
 To give a new format a native grid, implement `native_cell_weights` on its
 `FileHandler` (see [docs/writing_a_reader.md](docs/writing_a_reader.md)). It
-is optional, and the only real requirement is that the cells it hands back
-**tile the region without overlapping** -- they need not form one grid.
+hands back the coordinate bounds of its cells one by one, so it is optional,
+it needs no single grid, and the only real requirement is that the cells
+**tile the region without overlapping**.
 
 ## Running on a cluster (SLURM)
 

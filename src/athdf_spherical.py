@@ -39,7 +39,7 @@ import numpy as np
 import h5py
 
 from .file import FileHandler
-from .utils import glob_files
+from .utils import glob_files, tensor_cell_bounds
 from .athenak import _sanitise
 from .interpolators.base import InterpolatorBase
 from .interpolators.coordinate_transformations import CartesianToSpherical
@@ -316,81 +316,73 @@ class SphericalAthdfFileHandler(FileHandler):
         slot: int,
         keys: tuple[str, ...],
         surface_radius: float | None = None,
-        ) -> tuple[list[tuple[tuple[np.ndarray, ...], np.ndarray]], float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
-        One entry per meshblock. The blocks are leaves and tile the domain --
-        ``load_grid`` refuses a file where they do not -- so their cells are a
-        partition and nothing is double counted.
+        Every meshblock is a small separable grid of its own, so the cells are
+        each block's cells, concatenated in block order to match the value
+        array's own layout. The blocks are leaves and tile the domain --
+        ``load_grid`` refuses a file where they do not -- so the concatenation
+        is a partition and nothing is double counted.
 
         Ghosts are stripped with ``file_ng``, the count the file actually
         carries, not ``self.n_ghosts``, which is only the interpolator's
-        minimum. Conveniently the same slice does both jobs: on a face array of
-        length ``nb + 1`` it leaves ``interior + 1`` faces, and on a value array
-        of length ``nb`` it leaves ``interior`` cells.
+        minimum.
 
-        Volumes come from ``x1f`` rather than from midpoints of ``x1v`` because
+        Bounds come from ``x1f`` rather than from midpoints of ``x1v`` because
         the radial spacing inside a block is generally geometric. ``x2f`` needs
         no polar correction: ``_fix_polar_ghost_nodes`` only rewrites ghost
         entries of ``x2v``, and interior faces are always within ``[0, pi]``.
         """
         ng = self.extra_data['file_ng']
         i1, i2, i3 = self.extra_data['interior']
-        x1f = self.extra_data['x1f']
-        x2f = self.extra_data['x2f']
-        x3f = self.extra_data['x3f']
         shape = self.extra_data['shape']
-        n_blocks = shape[0]
         # Slice by explicit extent rather than ng:-ng. file_ng is only
         # guaranteed >= the interpolator's requirement, and a future
         # interpolator needing none would turn ng:-ng into an empty 0:0.
-        s2, s3 = slice(ng, ng + i2), slice(ng, ng + i3)
+        r_f = np.asarray(self.extra_data['x1f'])[:, ng:ng + i1 + 1]
+        cth_f = np.cos(np.asarray(self.extra_data['x2f'])[:, ng:ng + i2 + 1])
+        ph_f = np.asarray(self.extra_data['x3f'])[:, ng:ng + i3 + 1]
 
-        interior = []
+        if surface_radius is None:
+            blocks = np.arange(shape[0])
+            i_r = None
+        else:
+            # Half-open on purpose. A block whose lower interior face equals
+            # r_surf owns it; its inner neighbour, whose upper face equals it,
+            # does not. So exactly one radial layer is taken even when the
+            # sphere lands on a block boundary.
+            blocks = np.flatnonzero((r_f[:, 0] <= surface_radius)
+                                    & (surface_radius < r_f[:, -1]))
+            if blocks.size == 0:
+                raise ValueError(
+                    f"No meshblock spans r = {surface_radius:g}; the requested "
+                    "surface lies outside the domain."
+                )
+            # Same cell as searchsorted(..., 'right') - 1, row by row. The
+            # bounds test above already guarantees it lands in [0, i1).
+            i_r = (r_f[blocks] <= surface_radius).sum(axis=1) - 1
+
+        faces = ((r_f, cth_f, ph_f) if i_r is None else (cth_f, ph_f))
+        bounds = [tensor_cell_bounds(*(f[b] for f in faces)) for b in blocks]
+        lo = np.concatenate([b[0] for b in bounds], axis=1)
+        hi = np.concatenate([b[1] for b in bounds], axis=1)
+
         shms = []
         try:
+            rows = []
             for key in keys:
                 shm = SharedMemory(name=self.shared_memory[slot][key])
                 shms.append(shm)
                 buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
-                interior.append(buf[:, ng:-ng, ng:-ng, ng:-ng])
-
-            blocks: list[tuple[tuple[np.ndarray, ...], np.ndarray]] = []
-            for b in range(n_blocks):
-                r_e = x1f[b, ng:ng + i1 + 1]
-                cth_e = np.cos(x2f[b, ng:ng + i2 + 1])
-                ph_e = x3f[b, ng:ng + i3 + 1]
-
-                if surface_radius is None:
-                    edges: tuple[np.ndarray, ...] = (r_e, cth_e, ph_e)
-                    vals = np.stack([v[b].ravel() for v in interior])
-                else:
-                    # Half-open on purpose. A block whose lower interior face
-                    # equals r_surf owns it; its inner neighbour, whose upper
-                    # face equals it, does not. So exactly one radial layer is
-                    # taken even when the sphere lands on a block boundary.
-                    if not (r_e[0] <= surface_radius < r_e[-1]):
-                        continue
-                    i_r = int(np.searchsorted(r_e, surface_radius, 'right')) - 1
-                    if not 0 <= i_r < i1:
-                        # Unreachable given the bounds check above, but a
-                        # negative index would silently wrap to the outermost
-                        # cell and hand back the wrong radius' worth of flux.
-                        continue
-                    edges = (cth_e, ph_e)
-                    vals = np.stack([v[b, i_r].ravel() for v in interior])
-
-                blocks.append((edges, vals))
+                interior = buf[:, ng:ng + i1, ng:ng + i2, ng:ng + i3]
+                rows.append((interior[blocks] if i_r is None
+                             else interior[blocks, i_r]).reshape(-1))
+            values = np.stack(rows)
         finally:
             for shm in shms:
                 shm.close()
-
-        if surface_radius is not None and not blocks:
-            raise ValueError(
-                f"No meshblock spans r = {surface_radius:g}; the requested "
-                "surface lies outside the domain."
-            )
 
         # r_used is None: nothing was snapped. Unlike a format storing discrete
         # shells, a cell here has radial *extent* containing the request, and
@@ -406,7 +398,7 @@ class SphericalAthdfFileHandler(FileHandler):
         # differing from the surface by up to half a radial cell, is the same
         # O(dr/r) the nearest-shell formats already accept, and is unsigned
         # across blocks so it does not accumulate.
-        return blocks, None
+        return lo, hi, values, None
 
     @staticmethod
     def parse_file(

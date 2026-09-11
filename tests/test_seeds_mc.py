@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from src.seeds import spherical_by_volume_mc, spherical_surface_mc, _auto_grid
+from src.utils import tensor_cell_bounds
 from src.integrators import ExplicitTrapezoid
 from tests.test_seeds import MockFileHandler
 from tests.test_seeds_surface import MockSurfaceFileHandler
@@ -261,16 +262,15 @@ class TestConservativeDensity:
         assert m_dens > m_plain
 
 
-class _TwoBlockHandler(MockFileHandler):
+class _SplitShellHandler(MockFileHandler):
     """
-    A handler whose native cells arrive as two adjacent radial blocks, with the
+    A handler whose native cells arrive as two adjacent radial groups, with the
     density non-zero in only one of them.
 
-    The seeder flattens blocks into a single index, so a mistake in the
-    block/local-index split is invisible to any total: the mass still sums
-    correctly, it is simply attributed to the wrong cells. Emptying one block
-    turns that into something observable -- every tracer must land in the
-    other.
+    Cells are handed over flat, so a mistake in the bounds-to-cell pairing is
+    invisible to any total: the mass still sums correctly, it is simply
+    attributed to the wrong cells. Emptying one group turns that into something
+    observable -- every tracer must land in the other.
     """
 
     SPLIT = 400.0
@@ -279,33 +279,34 @@ class _TwoBlockHandler(MockFileHandler):
         n = 8
         cth = np.linspace(1.0, -1.0, 5)
         ph = np.linspace(0.0, 2 * np.pi, 9)
-        blocks = []
-        for lo, hi, rho in ((R_MIN, self.SPLIT, 0.0), (self.SPLIT, R_MAX, 1.0)):
-            r_e = np.geomspace(lo, hi, n + 1)
-            n_cells = n * (len(cth) - 1) * (len(ph) - 1)
-            blocks.append(((r_e, cth, ph),
-                           np.full((len(keys), n_cells), rho)))
-        return blocks, None
+        los, his, rows = [], [], []
+        for r_lo, r_hi, rho in ((R_MIN, self.SPLIT, 0.0), (self.SPLIT, R_MAX, 1.0)):
+            lo, hi = tensor_cell_bounds(np.geomspace(r_lo, r_hi, n + 1), cth, ph)
+            los.append(lo)
+            his.append(hi)
+            rows.append(np.full((len(keys), lo.shape[1]), rho))
+        return (np.concatenate(los, axis=1), np.concatenate(his, axis=1),
+                np.concatenate(rows, axis=1), None)
 
 
-class TestNativeBlockSeeding:
+class TestNativeCellSeeding:
     @staticmethod
     def _seed(n_tracers=2000, seed=7):
         np.random.seed(seed)
-        fh = _TwoBlockHandler(lambda r: np.ones_like(r), keys=('rho',), time=0.0)
+        fh = _SplitShellHandler(lambda r: np.ones_like(r), keys=('rho',), time=0.0)
         return spherical_by_volume_mc(
             r_min=R_MIN, r_max=R_MAX, n_tracers=n_tracers, start_t=0.0,
             weight_grid='native',
             file_handler=fh, integrator=ExplicitTrapezoid(), vel_keys=('rho',),
         )
 
-    def test_every_tracer_lands_in_the_populated_block(self):
+    def test_every_tracer_lands_in_the_populated_shell(self):
         r = _radii(self._seed())
-        assert r.min() >= _TwoBlockHandler.SPLIT
+        assert r.min() >= _SplitShellHandler.SPLIT
         assert r.max() <= R_MAX * (1 + 1e-12)
 
-    def test_total_mass_is_the_populated_block_only(self):
-        """rho = 1 over the outer block, so M = 4/3 pi (r_max^3 - split^3)."""
+    def test_total_mass_is_the_populated_shell_only(self):
+        """rho = 1 outside the split, so M = 4/3 pi (r_max^3 - split^3)."""
         m = _masses(self._seed()).sum()
-        expected = 4 / 3 * np.pi * (R_MAX**3 - _TwoBlockHandler.SPLIT**3)
+        expected = 4 / 3 * np.pi * (R_MAX**3 - _SplitShellHandler.SPLIT**3)
         assert m == pytest.approx(expected, rel=1e-3)

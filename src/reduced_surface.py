@@ -13,7 +13,7 @@ from h5py import File
 import numpy as np
 
 from .file import FileHandler
-from .utils import glob_files
+from .utils import glob_files, tensor_cell_bounds
 from .gra_surface import _fill_with_ghosts
 from .interpolators.base import InterpolatorBase
 from .interpolators.coordinate_transformations import CartesianToSpherical
@@ -96,7 +96,7 @@ class ReducedSurfaceFileHandler(FileHandler):
         slot: int,
         keys: tuple[str, ...],
         surface_radius: float | None = None,
-        ) -> tuple[list[tuple[tuple[np.ndarray, ...], np.ndarray]], float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
         See :meth:`~src.file.FileHandler.native_cell_weights`.
 
@@ -123,16 +123,15 @@ class ReducedSurfaceFileHandler(FileHandler):
             q = float(r[1] / r[0])          # constant, the grid is geometric
             r_edges = np.concatenate((r / np.sqrt(q), [r[-1] * np.sqrt(q)]))
             i_r = slice(None)
-            edges: tuple[np.ndarray, ...] = (r_edges, cth_edges, ph_edges)
+            lo, hi = tensor_cell_bounds(r_edges, cth_edges, ph_edges)
             r_used = None
         else:
             j = int(np.argmin(np.abs(r - surface_radius)))
             i_r = slice(j, j + 1)
-            edges = (cth_edges, ph_edges)
+            lo, hi = tensor_cell_bounds(cth_edges, ph_edges)
             r_used = float(r[j])
 
-        n_cells = (len(r) if surface_radius is None else 1) * len(th) * len(ph)
-        values = np.empty((len(keys), n_cells))
+        values = np.empty((len(keys), lo.shape[1]))
         for i_k, key in enumerate(keys):
             shm = SharedMemory(name=self.shared_memory[slot][key])
             try:
@@ -141,8 +140,7 @@ class ReducedSurfaceFileHandler(FileHandler):
             finally:
                 shm.close()
 
-        # One global grid, so a single block.
-        return [(edges, values)], r_used
+        return lo, hi, values, r_used
 
     @staticmethod
     def load_step_to_memory(

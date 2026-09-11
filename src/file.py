@@ -128,9 +128,9 @@ class FileHandler(ABC):
         slot: int,
         keys: tuple[str, ...],
         surface_radius: float | None = None,
-        ) -> tuple[list[tuple[tuple[np.ndarray, ...], np.ndarray]], float | None]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float | None]:
         """
-        The format's **own** cells, as edges plus the field values on them.
+        The format's **own** cells, as coordinate bounds plus the values on them.
 
         Optional. Implement it if the format can say where its cells are and
         what is in them, so mass-weighted seeding samples the data as written
@@ -139,16 +139,17 @@ class FileHandler(ABC):
         helper route's cost is dominated by building an interpolator per
         sampled snapshot, not by evaluating it.
 
-        The return is a **list of blocks**, each a separable grid of its own.
-        A format holding one global spherical grid returns a single block; a
-        block-structured or AMR format returns one entry per meshblock. The
-        only requirements are that the blocks **tile the region without
+        Cells are described one at a time, by a lower and an upper bound along
+        each axis, and nothing about how they are arranged comes back. One
+        global grid, a union of meshblocks and an AMR hierarchy all flatten to
+        the same pair of arrays, so the seeder needs to know nothing about the
+        format's mesh. :func:`src.utils.tensor_cell_bounds` builds the pair
+        from a separable grid's edges, which is the whole of the work for a
+        format that has one.
+
+        The only requirements are that the cells **tile the region without
         overlapping** -- otherwise the sampled mass is double counted where
         they do -- and that ghost cells are excluded.
-
-        Edges rather than centres, so a caller can size cells, place points
-        inside them and integrate over them with exactly the code it uses for
-        a helper grid.
 
         Parameters
         ----------
@@ -163,18 +164,19 @@ class FileHandler(ABC):
 
         Returns
         -------
-        blocks : list of (edges, values)
-            ``edges`` is ``(r_edges, cos_theta_edges, phi_edges)``, or
-            ``(cos_theta_edges, phi_edges)`` when ``surface_radius`` is given.
-            ``values`` has shape ``(len(keys), n_cells)``, C-ordered over the
-            cells those edges define. ``cos_theta_edges`` is monotone but may
-            ascend or descend -- AthenaK's equal-solid-angle grids run the
-            other way from GR-Athena++'s -- so callers must not assume a
-            direction. Taking ``abs`` of the differences for a measure and
-            carrying their sign when placing points inside a cell handles both.
+        lo, hi : ndarray, shape (D, n_cells)
+            Lower and upper bound of every cell along every axis:
+            ``(r, cos(theta), phi)`` for a volume, ``(cos(theta), phi)`` on a
+            surface. ``lo <= hi`` elementwise, whichever way the format's own
+            axes run -- AthenaK's equal-solid-angle ``cos(theta)`` descends
+            where GR-Athena++'s ascends, and sorting the pair here spares every
+            caller the special case.
+        values : ndarray, shape (len(keys), n_cells)
+            The fields on those cells, in the same cell order.
         r_used : float or None
             The radius the cells actually sit at, when ``surface_radius`` was
-            given and the format snapped it to its own grid.
+            given and the format snapped it to its own grid. None means it did
+            not snap and the requested radius still applies.
 
         Raises
         ------

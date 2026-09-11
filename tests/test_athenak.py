@@ -734,7 +734,7 @@ class TestNativeCellWeights:
     """
     The native weight grid for the mass-weighted seeding modes.
 
-    The thing worth checking is that the edges *tile* the sphere: whatever
+    The thing worth checking is that the cells *tile* the sphere: whatever
     convention the polar axis is in, and whether or not its samples sit on
     the poles, the cell measures have to sum to the full solid angle. If they
     do not, every sampled mass is wrong by the same factor and nothing
@@ -753,16 +753,17 @@ class TestNativeCellWeights:
     def test_edges_tile_the_full_solid_angle(self, tmp_path, convention):
         fh = self._loaded(tmp_path, convention)
         try:
-            blocks, r_used = fh.native_cell_weights(0, ("rho",))
-            # One global grid, so exactly one block -- the contract's
-            # single-grid case, worth pinning explicitly.
-            assert len(blocks) == 1
-            (r_e, c_e, p_e), vals = blocks[0]
+            lo, hi, vals, r_used = fh.native_cell_weights(0, ("rho",))
             assert r_used is None
-            # sum |dcos(theta)| dphi over every cell == 4 pi
-            solid = np.abs(np.diff(c_e)).sum() * np.diff(p_e).sum()
-            assert solid == pytest.approx(4 * np.pi, rel=1e-12)
-            assert vals.shape == (1, (len(r_e) - 1) * (len(c_e) - 1) * (len(p_e) - 1))
+            assert lo.shape == hi.shape == (3, vals.shape[1])
+            assert np.all(hi >= lo)
+            # The cells fill the shell exactly once, so their volumes sum to it.
+            r = np.asarray(fh.extra_data['r'])
+            vol = ((hi[0] ** 3 - lo[0] ** 3) / 3 * (hi[1] - lo[1]) * (hi[2] - lo[2]))
+            r_in, r_out = lo[0].min(), hi[0].max()
+            exact = 4 * np.pi * (r_out ** 3 - r_in ** 3) / 3
+            assert vol.sum() == pytest.approx(exact, rel=1e-12)
+            assert vals.shape[1] == len(r) * (lo.shape[1] // len(r))
         finally:
             fh.free_shared_memory()
 
@@ -774,12 +775,13 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, convention)
         try:
-            blocks, _ = fh.native_cell_weights(0, ("rho",))
-            (_, c_e, _), _ = blocks[0]
-            assert min(c_e[0], c_e[-1]) == pytest.approx(-1.0)
-            assert max(c_e[0], c_e[-1]) == pytest.approx(1.0)
-            d = np.diff(c_e)
-            assert np.all(d > 0) or np.all(d < 0)
+            lo, hi, _, _ = fh.native_cell_weights(0, ("rho",))
+            assert lo[1].min() == pytest.approx(-1.0)
+            assert hi[1].max() == pytest.approx(1.0)
+            # solid angle over one radial shell's worth of cells is 4 pi
+            n_ang = lo.shape[1] // len(np.asarray(fh.extra_data['r']))
+            solid = ((hi[1] - lo[1]) * (hi[2] - lo[2]))[:n_ang].sum()
+            assert solid == pytest.approx(4 * np.pi, rel=1e-12)
         finally:
             fh.free_shared_memory()
 
@@ -788,13 +790,12 @@ class TestNativeCellWeights:
         try:
             r = np.asarray(fh.extra_data['r'])
             target = float(r[3]) * 1.01          # deliberately off-grid
-            blocks, r_used = fh.native_cell_weights(0, ("rho",),
-                                                    surface_radius=target)
-            assert len(blocks) == 1
-            edges, vals = blocks[0]
+            lo, hi, vals, r_used = fh.native_cell_weights(0, ("rho",),
+                                                          surface_radius=target)
             assert r_used == pytest.approx(float(r[3]))
-            assert len(edges) == 2                # (cos_theta, phi) only
-            assert vals.shape[1] == (len(edges[0]) - 1) * (len(edges[1]) - 1)
+            assert lo.shape == hi.shape == (2, vals.shape[1])   # (cos theta, phi)
+            solid = ((hi[0] - lo[0]) * (hi[1] - lo[1])).sum()
+            assert solid == pytest.approx(4 * np.pi, rel=1e-12)
         finally:
             fh.free_shared_memory()
 
@@ -805,9 +806,9 @@ class TestNativeCellWeights:
         """
         fh = self._loaded(tmp_path, "theta_cell")
         try:
-            blocks, _ = fh.native_cell_weights(0, ("rho",))
-            (r_e, c_e, p_e), vals = blocks[0]
-            n_c, n_p = len(c_e) - 1, len(p_e) - 1
+            _, _, vals, _ = fh.native_cell_weights(0, ("rho",))
+            n_c = len(np.asarray(fh.extra_data['polar_nodes'])) - 2 * fh.n_ghosts
+            n_p = len(np.asarray(fh.extra_data['ph'])) - 2 * fh.n_ghosts
             i_r, i_c, i_p = 5, 4, 3
             # The node, not the midpoint of the cell: a cell-centred theta grid
             # puts its sample at the middle in theta, which is not the middle

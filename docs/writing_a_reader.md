@@ -229,8 +229,8 @@ Once your handler runs, check these before trusting a production run:
 
 Nothing above requires it, and a reader that omits it is complete. Implement
 it if your format can enumerate its own cells. It does **not** need one global
-grid: the return is a list of blocks, and a block-structured or AMR format
-returns one entry per meshblock. `athdf_spherical` does exactly that.
+grid: cells are described one at a time, so a block-structured or AMR format
+works the same way. `athdf_spherical` does exactly that.
 
 The mass-weighted `-mc` seeding modes need the density, or the mass flux, over
 the seeding region in order to build their sampling weights. By default they
@@ -240,33 +240,45 @@ per sampled snapshot, and it puts an interpolation error and a midpoint rule
 between the data and the weights.
 
 `native_cell_weights(slot, keys, surface_radius=None)` hands the seeder those
-cells instead. Return a **list of blocks**, each **cell edges** rather than
-centres -- `(r_edges, cos_theta_edges, phi_edges)`, or `(cos_theta_edges,
-phi_edges)` for a single shell -- paired with the field values C-ordered over
-the cells those edges define, plus the radius actually used. Edges let the
-caller size cells, place tracers inside them and integrate over them with
-exactly the code it uses for the helper grid, so nothing downstream needs to
-know which route was taken, or how many blocks it got.
+cells instead. Return `lo, hi, values, r_used`, where `lo` and `hi` are
+`(D, n_cells)`: the lower and upper bound of every cell along every axis,
+`(r, cos_theta, phi)` for a volume and `(cos_theta, phi)` for a single shell.
+`values` is `(len(keys), n_cells)` in the same cell order.
+
+Bounds rather than centres, because the caller has to size each cell and place
+a tracer inside it. Nothing about the arrangement comes back, so the seeder
+never learns whether it got one grid, a thousand meshblocks, or a refinement
+hierarchy, and there is only one code path downstream.
+
+If your format does keep a separable grid, the whole implementation is
+`src.utils.tensor_cell_bounds(*edges)`, which turns per-axis faces into that
+pair. A block-structured format calls it once per block and concatenates, in
+the same order the values are concatenated.
 
 Four things to get right:
 
-- **The blocks must tile the region without overlapping.** This is the one
+- **The cells must tile the region without overlapping.** This is the one
   requirement that is not obvious and not checked for you. Cells counted twice
   are mass counted twice, and it biases every sampled tracer silently. Under
   AMR, be sure you are handing back leaves only. `athdf_spherical` gets this
   from the octree check `load_grid` already performs.
 
 - **Strip ghost zones** before returning anything. The values must line up
-  with the edges, one per cell.
-- **Give real edges, not sample points.** For a geometrically spaced radial
-  axis a sample sits at the geometric centre of its cell, so the edges are at
-  `r * q**(-+1/2)`; for a uniform cell-centred angular axis they are half a
-  spacing either side. Getting this wrong biases every cell mass.
+  with the bounds, one per cell.
+- **Give real cell bounds, not sample points.** For a geometrically spaced
+  radial axis a sample sits at the geometric centre of its cell, so the bounds
+  are at `r * q**(-+1/2)`; for a uniform cell-centred angular axis they are
+  half a spacing either side. Getting this wrong biases every cell mass.
 - **Snap, do not interpolate.** With `surface_radius` given, pick the nearest
   shell and report it back as `r_used`. The caller tells the user what it
   moved to. Return `None` if you did not snap -- a format whose cells have
   radial *extent* containing the requested radius has nothing to move, and
   `None` says so, leaving the caller's own radius in place.
+
+`lo <= hi` is required elementwise, which `tensor_cell_bounds` already
+guarantees. An axis running downward is fine and common -- AthenaK's
+equal-solid-angle `cos_theta` does -- it just must not arrive unsorted, so
+that every consumer can write `hi - lo` without an `abs`.
 
 `--weight-grid native` will raise if the method is missing, `auto` falls back
 silently, and the base-class implementation raises `NotImplementedError` with
