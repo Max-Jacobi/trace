@@ -3,6 +3,7 @@
 import numpy as np
 from tqdm import tqdm
 from collections import defaultdict
+from collections.abc import Callable
 from multiprocessing import Pool
 from .tracers import Tracers
 from .integrators import IntegratorBase
@@ -617,7 +618,9 @@ def _sample_cells(
     if total <= 0:
         raise ValueError(
             f"The {what} weight vanishes everywhere on the sampling grid; "
-            "nothing to sample from.  Check the radial/angular range and --density-key."
+            "nothing to sample from.  Check the radial/angular range, "
+            "--density-key, and any field filters -- a cut that no cell passes "
+            "leaves exactly this."
         )
     idx = np.random.choice(len(weights), size=n_tracers, p=abs_weights / total)
     return idx, np.sign(weights[idx]), total
@@ -636,7 +639,8 @@ class _Cells:
     being counted twice.
     """
 
-    def __init__(self, lo, hi, r_surf: float | None = None, label: str | None = None):
+    def __init__(self, lo, hi, r_surf: float | None = None, label: str | None = None,
+                 index: np.ndarray | None = None):
         self.lo = np.asarray(lo, dtype=float)
         self.hi = np.asarray(hi, dtype=float)
         if self.lo.shape != self.hi.shape:
@@ -647,6 +651,10 @@ class _Cells:
             raise ValueError("No cells to sample from in the requested region.")
         self.r_surf = r_surf
         self.label = label
+        # Which of the format's own cells these are, when they are its own:
+        # the column each kept cell had in native_cell_weights, so a field can
+        # be read off those cells instead of interpolated onto their centres.
+        self.index = None if index is None else np.asarray(index)
 
     @property
     def n_cells(self) -> int:
@@ -721,7 +729,8 @@ def _native_cells(file_handler, slot, ranges, r_surf=None):
             "No native cell falls in the requested region; check --r-min/--r-max "
             "and the angular limits against the data's extent."
         )
-    cells = _Cells(lo[:, keep], hi[:, keep], r_surf=r_surf)
+    cells = _Cells(lo[:, keep], hi[:, keep], r_surf=r_surf,
+                   index=np.flatnonzero(keep))
     return cells, weights[keep] * frac[keep]
 
 
@@ -744,6 +753,76 @@ def _helper_weights(file_handler, i_loc, cells, radial: bool) -> np.ndarray:
         interp.unload()
     dens = md.radial_flux(vals, pos_c) if radial else md.density(vals, pos_c)
     return dens * cells.measure()
+
+
+def _cell_values(file_handler, i_loc: int, cells: _Cells,
+                 keys: tuple[str, ...]) -> np.ndarray:
+    """
+    The value of `keys` on every cell, shape ``(len(keys), n_cells)``.
+
+    Cells that are the format's own are read straight out of shared memory,
+    which is where the values already sit; interpolating a field back onto the
+    centres it was written on costs an interpolator build plus a stencil per
+    cell, and on a fine mesh that dwarfs everything else the seeding does. Any
+    other cells -- the helper grid -- leave no choice but the interpolator.
+
+    ponytail: on the helper grid this is a second interpolator build, on top of
+    the one _helper_weights already made for the same snapshot. Evaluate both
+    key sets in one call if the helper route's filter cost ever matters; the
+    native route, which is the cheap one worth keeping cheap, does not care.
+    """
+    read = getattr(file_handler, 'native_cell_values', None)
+    if cells.index is not None and read is not None:
+        try:
+            return read(i_loc, keys, surface_radius=cells.r_surf)[:, cells.index]
+        except NotImplementedError:
+            pass
+    interp = _sampling_interpolator(file_handler, i_loc, keys)
+    interp.load()
+    try:
+        return interp(cells.centres())
+    finally:
+        interp.unload()
+
+
+def _filter_factor(
+    file_handler,
+    i_loc: int,
+    cells: _Cells,
+    filters: dict[str, Callable] | None,
+    ) -> np.ndarray | float:
+    """
+    The user's own factor on every cell, from the fields they name.
+
+    Each callable is handed its field's values on the cells -- shape
+    ``(n_cells,)`` -- and returns a factor per cell: 0 to keep tracers out of
+    that cell entirely, 1 to leave it alone, anything non-negative in between
+    to down- or upweight it. The factors of all named fields multiply together.
+
+    On the format's own cells the values are read straight off them; anywhere
+    else they are interpolated at the cell centres. See :func:`_cell_values`.
+    """
+    if not filters:
+        return 1.0
+    missing = [k for k in filters if k not in file_handler.keys]
+    if missing:
+        raise ValueError(
+            f"The seeding filter asks for {missing}, which are not among the "
+            f"loaded keys {list(file_handler.keys)}. Add them to --keys."
+        )
+    vals = _cell_values(file_handler, i_loc, cells, tuple(filters))
+    factor = np.ones(cells.n_cells)
+    for v, fn in zip(vals, filters.values()):
+        factor = factor * np.asarray(fn(v), dtype=float)
+    return factor
+
+
+def _filter_note(filters: dict[str, Callable] | None, before: float, after: float) -> str:
+    """The clause the seeders append to their summary when a filter was used."""
+    if not filters:
+        return ""
+    cut = 100 * (1 - after / before) if before else 100.0
+    return f", filtering out {cut:.1f}% of it on {', '.join(filters)}"
 
 
 # The coordinates every seeder in this module works in: regions are given in
@@ -801,6 +880,7 @@ def spherical_by_volume_mc(
     theta_max: float = np.pi,
     cells_per_tracer: int = 8,
     weight_grid: str = 'auto',
+    weight_filters: dict[str, Callable] | None = None,
     **kwargs
     ) -> Tracers:
     """
@@ -837,6 +917,14 @@ def spherical_by_volume_mc(
     cells_per_tracer : int, optional
         Helper-grid cells per tracer.  Higher values resolve the density
         field better at the cost of more interpolator evaluations.
+    weight_filters : dict[str, Callable], optional
+        Field name -> factor on the sampling weight, e.g.
+        ``{'T': lambda T: (T <= 1.0).astype(float)}`` to seed nothing hotter
+        than 1 MeV.  Each callable gets that field's values on the cells and
+        returns one factor per cell, usually 0 or 1; the factors of all
+        fields multiply into the weight.  The fields must be among the handler's
+        loaded keys.  The tracers then carry the *filtered* mass, so what they
+        represent is the mass passing the cut and not the shell's total.
     **kwargs
         Passed to ``Tracers``; must include ``file_handler``.
 
@@ -871,6 +959,9 @@ def spherical_by_volume_mc(
         )
         weights = _helper_weights(file_handler, i_loc, cells, radial=False)
 
+    w_unfiltered = float(np.nansum(np.abs(weights)))
+    weights = weights * _filter_factor(file_handler, i_loc, cells, weight_filters)
+
     idx, signs, m_tot = _sample_cells(weights, n_tracers, "mass")
 
     positions = cells.sample_positions(
@@ -880,7 +971,8 @@ def spherical_by_volume_mc(
     print(f"Sampled {n_tracers} tracers of mass {m_tot/n_tracers:.4e} from a "
           f"{cells.describe()} {'native' if native else 'interpolated'} weight grid "
           f"(total mass {masses.sum():.4e} of {np.nansum(weights):.4e} on the grid, "
-          f"weighted by {file_handler.mass_density.describe()}).")
+          f"weighted by {file_handler.mass_density.describe()}"
+          f"{_filter_note(weight_filters, w_unfiltered, m_tot)}).")
     return Tracers(
         positions=positions,
         times=np.full(n_tracers, start_t),
@@ -899,6 +991,7 @@ def spherical_surface_mc(
     theta_max: float = np.pi,
     cells_per_tracer: int = 8,
     weight_grid: str = 'auto',
+    weight_filters: dict[str, Callable] | None = None,
     **kwargs
     ) -> Tracers:
     """
@@ -931,8 +1024,9 @@ def spherical_surface_mc(
         Number of tracers to draw.
     phi_min, phi_max, theta_min, theta_max : float
         Angular domain (radians).
-    cells_per_tracer, weight_grid
-        As in ``spherical_by_volume_mc``.
+    cells_per_tracer, weight_grid, weight_filters
+        As in ``spherical_by_volume_mc``.  The filter is re-evaluated at every
+        sampled snapshot, since the fields it reads change with time.
     **kwargs
         Passed to ``Tracers``; must include ``file_handler`` and ``vel_keys``.
 
@@ -980,6 +1074,7 @@ def spherical_surface_mc(
     n_cells = cells.n_cells
 
     weights = np.zeros((n_t, n_cells))
+    w_unfiltered = 0.0
     chunk_indices, forward, _, _ = file_handler.get_chunk_indices(
         t_start[0], t_start[-1], overlap=False)
 
@@ -1005,6 +1100,9 @@ def spherical_surface_mc(
                         )
                 else:
                     flux = _helper_weights(file_handler, i_loc, cells, radial=True)
+                w_unfiltered += float(np.nansum(np.abs(flux))) * dt[i_t[0]]
+                flux = flux * _filter_factor(
+                    file_handler, i_loc, cells, weight_filters)
                 weights[i_t[0]] = flux * dt[i_t[0]]
     finally:
         file_handler.parallel_kwargs['verbose'] = _remember_verbose
@@ -1022,7 +1120,8 @@ def spherical_surface_mc(
           f"{'native' if native else 'interpolated'} weight grid "
           f"({(signs < 0).sum()} inflowing; net mass {masses.sum():.4e} of "
           f"{np.nansum(weights):.4e} on the grid, {m_tot:.4e} crossing either way, "
-          f"weighted by {file_handler.mass_density.describe()}).")
+          f"weighted by {file_handler.mass_density.describe()}"
+          f"{_filter_note(weight_filters, w_unfiltered, m_tot)}).")
     return Tracers(
         positions=positions,
         times=times,

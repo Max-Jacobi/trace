@@ -37,13 +37,25 @@ density.  With --adm-mass they weight with the conserved D = sqrt(gamma) W rho:
     python run_pipeline.py --data-dir data/transformed --output-dir data/out \\
         --start-t 11600 --end-t 0 --adm-mass 2.7 \\
         surface-mc --r-surf 300 --n-tracers 5000 --every-n-files 5
+
+--weight-filter cuts the sampling weight on the fields themselves, so nothing
+is seeded where the cut fails and the tracers carry only the mass that passes
+it:
+
+    python run_pipeline.py --data-dir data/transformed --output-dir data/out \\
+        --start-t 11600 --end-t 0 \\
+        volume-mc --r-min 300 --r-max 1000 --n-tracers 5000 \\
+        --weight-filter 'T<1'
 """
 
 import argparse
+import operator
 import os
+import re
 import sys
 
 import numpy as np
+from collections.abc import Callable
 
 # Re-exported: the tracer masses are rho-based unless a seeder densitizes them.
 
@@ -60,6 +72,49 @@ from src.seeds import (
 )
 
 DEFAULT_VEL_KEYS = ('V_u_x', 'V_u_y', 'V_u_z')
+
+# A '--weight-filter' spec: a field, a comparison, a number.  '>=' before '>'
+# so the two-character forms win.
+_FILTER_SPEC = re.compile(r'^\s*(\w+)\s*(<=|>=|==|!=|<|>)\s*(\S+)\s*$')
+_FILTER_OPS = {'<': operator.lt, '<=': operator.le, '>': operator.gt,
+               '>=': operator.ge, '==': operator.eq, '!=': operator.ne}
+
+
+def parse_weight_filters(specs: list[str]) -> dict[str, Callable]:
+    """
+    Turn ``['T<1', 'ye>0.1']`` into the seeders' ``weight_filters`` dict: one
+    callable per field, returning 1.0 where the cut holds and 0.0 where it does
+    not.  Several cuts on the same field are ANDed into a single callable.
+
+    Threshold cuts are all the command line offers; a filter that is a smooth
+    taper, or reads two fields at once, is written as a dict of callables in
+    Python and passed to the seeder directly.
+    """
+    cuts: dict[str, list[tuple[Callable, float]]] = {}
+    for spec in specs:
+        m = _FILTER_SPEC.match(spec)
+        if m is None:
+            raise ValueError(
+                f"--weight-filter {spec!r} is not of the form 'field<value', "
+                f"with the comparison one of {sorted(_FILTER_OPS)}."
+            )
+        key, op, value = m.groups()
+        try:
+            threshold = float(value)
+        except ValueError:
+            raise ValueError(
+                f"--weight-filter {spec!r}: {value!r} is not a number."
+            ) from None
+        cuts.setdefault(key, []).append((_FILTER_OPS[op], threshold))
+
+    def factor(values, key_cuts):
+        keep = np.ones_like(values, dtype=float)
+        for op, threshold in key_cuts:
+            keep *= op(values, threshold)
+        return keep
+
+    return {key: (lambda v, c=key_cuts: factor(v, c))
+            for key, key_cuts in cuts.items()}
 
 # Per-format defaults for the options whose sensible value depends on the
 # data source.  Anything given explicitly on the command line wins.
@@ -322,6 +377,16 @@ def parse_args() -> argparse.Namespace:
     surface_mc.add_argument('--cells-per-tracer', type=int, default=8,
                              help="Weight-grid cells per tracer (spread over angles and times).")
 
+    for p in (volume_mc, surface_mc):
+        p.add_argument('--weight-filter', nargs='+', default=[], metavar='FIELD<VALUE',
+                       help="Zero the sampling weight where a field fails a cut, e.g. "
+                            "--weight-filter 'T<1' 'r_0>0.1' to seed only material "
+                            "cooler than 1 MeV and above Ye = 0.1. Comparisons: "
+                            "< <= > >= == !=. Several cuts on one field all have to "
+                            "hold. Every field named must be in --keys. The tracers "
+                            "then carry the mass that passes the cut, not the "
+                            "region's total.")
+
     args = parser.parse_args()
 
     fmt = FORMATS[args.format]
@@ -345,6 +410,16 @@ def parse_args() -> argparse.Namespace:
     missing = [k for k in args.positive_keys if k not in args.keys]
     if missing:
         parser.error(f"--positive-keys entries not present in --keys: {missing}")
+    # Parsed here rather than at seeding time, so a typo in a cut fails before
+    # the run has opened a single file.
+    if getattr(args, 'weight_filter', None) is not None:
+        try:
+            args.weight_filters = parse_weight_filters(args.weight_filter)
+        except ValueError as err:
+            parser.error(str(err))
+        missing = [k for k in args.weight_filters if k not in args.keys]
+        if missing:
+            parser.error(f"--weight-filter fields not present in --keys: {missing}")
     return args
 
 
@@ -461,6 +536,7 @@ def seed_tracers(args: argparse.Namespace, integrator, file_handler):
     mc_kwargs = dict(
         cells_per_tracer=args.cells_per_tracer,
         weight_grid=args.weight_grid,
+        weight_filters=args.weight_filters,
         phi_min=phi_min, phi_max=phi_max,
         theta_min=theta_min, theta_max=theta_max,
         **common_kwargs,

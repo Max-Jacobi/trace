@@ -217,3 +217,36 @@ class TestDensitizationProvenance:
         tr = self._tr()
         write_output(_StubTracers([tr]), str(tmp_path), MassDensity())
         assert "adm_mass" not in tr.props
+
+
+class TestParseWeightFilters:
+    """'--weight-filter T<1' has to become the seeders' dict of callables."""
+
+    @staticmethod
+    def _factor(spec, values):
+        from run_pipeline import parse_weight_filters
+        filters = parse_weight_filters(spec)
+        (fn,) = filters.values()
+        return fn(np.asarray(values, dtype=float))
+
+    def test_a_single_cut(self):
+        np.testing.assert_array_equal(
+            self._factor(['T<1'], [0.5, 1.0, 2.0]), [1.0, 0.0, 0.0])
+
+    def test_whitespace_and_two_character_operators(self):
+        np.testing.assert_array_equal(
+            self._factor(['ye >= 0.1'], [0.05, 0.1, 0.3]), [0.0, 1.0, 1.0])
+
+    def test_two_cuts_on_one_field_both_have_to_hold(self):
+        np.testing.assert_array_equal(
+            self._factor(['T<1', 'T>0.1'], [0.05, 0.5, 2.0]), [0.0, 1.0, 0.0])
+
+    def test_several_fields_stay_separate(self):
+        from run_pipeline import parse_weight_filters
+        assert sorted(parse_weight_filters(['T<1', 'ye>0.1'])) == ['T', 'ye']
+
+    @pytest.mark.parametrize('spec', ['T', 'T=1', 'T<x', '<1'])
+    def test_a_malformed_spec_is_refused(self, spec):
+        from run_pipeline import parse_weight_filters
+        with pytest.raises(ValueError, match='--weight-filter'):
+            parse_weight_filters([spec])

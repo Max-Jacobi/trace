@@ -325,6 +325,7 @@ python run_pipeline.py --data-dir ... --output-dir ... --start-t ... --end-t ...
 | `--every-n-files` (`surface-mc`) | `1` | Sample the flux every Nth snapshot between `--start-t` and `--end-t`. Raising it cuts the cost of the flux integral at the price of a coarser time axis. |
 | `--weight-grid` | `auto` | Grid the sampling weights are built on: `native` uses the data's own grid with no interpolation at all, `helper` builds an interpolated one sized by `--cells-per-tracer`, `auto` takes native where the format provides it. See [`--weight-grid`](#where-the-sampling-weights-come-from---weight-grid). |
 | `--cells-per-tracer` | `8` | Resolution of the *helper* weight grid (`--n-tracers` times this many cells, split over the axes so cells are roughly isotropic). Raise it to resolve a structured density/flux field better, at the price of more interpolations. Ignored under `--weight-grid native`, where the grid is whatever the data is. |
+| `--weight-filter` | none | Zero the sampling weight where a field fails a cut, e.g. `--weight-filter 'T<1' 'r_0>0.1'`. Nothing is then seeded there, and the tracers carry the mass that passes the cut rather than the region's total. See [`--weight-filter`](#filtering-what-gets-seeded---weight-filter). |
 
 The weight grid is only the sampling PDF and the mass normalisation: the
 tracer positions themselves are drawn continuously (uniformly in volume,
@@ -484,9 +485,68 @@ To give a new format a native grid, implement `native_cell_weights` on its
 `FileHandler` (see [docs/writing_a_reader.md](docs/writing_a_reader.md)). It
 hands back the coordinate bounds of its cells one by one, plus the mass in
 each, so it is optional, it needs no single grid, and the only real
-requirement is that the cells **tile the region without overlapping**. What a
+requirement is that the cells **tile the region without overlapping**. Its
+companion `native_cell_values` returns a raw field on those same cells, which
+is what keeps `--weight-filter` free on the native grid. What a
 mass is comes from the same class, via `build_mass_density` -- see
 [What counts as mass](#what-counts-as-mass---adm-mass).
+
+### Filtering what gets seeded: `--weight-filter`
+
+Sometimes only part of the mass is worth tracing. Material still too hot to
+have frozen out, a low-`ye` component, a wind picked out by its entropy: the
+weight can be cut on the fields themselves, so the sampler never places a
+tracer there.
+
+```bash
+# only material cooler than 1 MeV, and only above Ye = 0.1
+python run_pipeline.py --data-dir ... --output-dir ... --start-t ... --end-t ... \
+    volume-mc --r-min 300 --r-max 1000 --n-tracers 5000 \
+    --weight-filter 'T<1' 'r_0>0.1'
+```
+
+Each cut is `field`, a comparison (`<`, `<=`, `>`, `>=`, `==`, `!=`) and a
+number. Several cuts on the same field all have to hold. Every field named
+must be in `--keys`, which is checked before a file is opened.
+
+A cut multiplies that cell's sampling weight by 0 or 1, so cells are kept or
+dropped whole, and the edge of the seeded region follows the cell boundaries
+of the weight grid rather than the cut value exactly. On `--weight-grid native`
+those are the data's own cells, which is as sharp as the data gets. In
+`surface-mc` the cut is re-read at every sampled snapshot, so a region that
+cools below the threshold starts being seeded when it does.
+
+`M_tot` in the summary line, and so the mass each tracer carries, is then the
+mass that **passes** the cut. The line says how much was filtered out:
+
+```
+Sampled 5000 tracers of mass 1.7241e-06 from a 213x128x256 native weight grid
+(total mass 8.6203e-03 of 8.6203e-03 on the grid, weighted by rho (rest-mass
+density, not densitized), filtering out 43.1% of it on T).
+```
+
+Reading the cut fields is free on the native grid, where the values are taken
+straight off the cells. On the helper grid it costs one more interpolator build
+per sampled snapshot, roughly +70% on the seeding step.
+
+Anything the command line cannot spell -- a smooth taper instead of a hard
+cut, or a condition on two fields at once -- is a `dict[str, Callable]` passed
+straight to the seeder in Python:
+
+```python
+from src.seeds import spherical_by_volume_mc
+
+tracers = spherical_by_volume_mc(
+    r_min=300, r_max=1000, n_tracers=5000, start_t=t0,
+    file_handler=fh, integrator=integrator, vel_keys=vel_keys,
+    # any factor per cell, not just 0 or 1
+    weight_filters={'T': lambda T: np.clip(2.0 - T, 0.0, 1.0)},
+)
+```
+
+Each callable is handed its field's values on the cells, shape `(n_cells,)`,
+and returns one factor per cell. The factors of all named fields multiply
+together.
 
 ## Running on a cluster (SLURM)
 

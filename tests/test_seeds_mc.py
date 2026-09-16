@@ -11,7 +11,8 @@ like the mass (not like the volume).
 import numpy as np
 import pytest
 
-from src.seeds import spherical_by_volume_mc, spherical_surface_mc, _auto_grid
+from src.seeds import (spherical_by_volume_mc, spherical_surface_mc,
+                       _auto_grid, _Cells)
 from src.utils import cell_measure, tensor_cell_bounds
 from src.integrators import ExplicitTrapezoid
 from tests.test_seeds import MockFileHandler
@@ -295,6 +296,23 @@ class _SplitShellHandler(MockFileHandler):
                 np.concatenate(masses))
 
 
+class _ValuesSplitShell(_SplitShellHandler):
+    """
+    The same cells, but able to hand a field off them -- and refusing to build
+    an interpolator, so a filter that still reaches for one fails loudly here.
+    """
+
+    def native_cell_values(self, slot, keys, surface_radius=None):
+        lo, hi, _ = self.native_cell_weights(slot, surface_radius)
+        r = np.linalg.norm(_Cells(lo, hi, r_surf=surface_radius).centres(), axis=0)
+        # As the mock interpolator does: the same field for every key.
+        return np.stack([self._density_fn(r) for _ in keys])
+
+    @staticmethod
+    def setup_interpolator(shm, extra_data):
+        raise AssertionError("a filter on native cells must not interpolate")
+
+
 class TestNativeCellSeeding:
     @staticmethod
     def _seed(n_tracers=2000, seed=7):
@@ -333,3 +351,108 @@ class TestNativeCellSeeding:
         m = _masses(self._seed()).sum()
         expected = 4 / 3 * np.pi * (R_MAX**3 - _SplitShellHandler.SPLIT**3)
         assert m == pytest.approx(expected, rel=1e-3)
+
+
+class TestWeightFilter:
+    """
+    A field filter multiplies the sampling weight per cell, so a cut zeroes a
+    region out of the seeding entirely and the tracers carry only the mass that
+    passes it.
+
+    The mock interpolator returns the density for *every* key, so a cut on 'T'
+    here is a cut on radius with a closed-form mass behind it.
+    """
+
+    R_CUT = 400.0
+
+    @staticmethod
+    def _seed(filters, n_tracers=4000, seed=12345):
+        np.random.seed(seed)
+        fh = MockFileHandler(lambda r: r**-3.0, keys=('rho', 'T'), time=0.0)
+        return spherical_by_volume_mc(
+            r_min=R_MIN, r_max=R_MAX, n_tracers=n_tracers, start_t=0.0,
+            file_handler=fh, integrator=ExplicitTrapezoid(), vel_keys=('rho',),
+            weight_filters=filters,
+        )
+
+    def _below_cut(self):
+        # T = rho = r^-3 falls with radius, so T >= R_CUT^-3 is r <= R_CUT.
+        return {'T': lambda T: (T >= TestWeightFilter.R_CUT**-3.0).astype(float)}
+
+    def test_nothing_is_seeded_beyond_the_cut(self):
+        r = _radii(self._seed(self._below_cut()))
+        # Whole cells are kept or dropped, so the edge is the first cell centre
+        # past the cut, at most one geometric cell width beyond it.
+        assert r.max() <= self.R_CUT * 1.15
+
+    def test_mass_is_the_mass_that_passes(self):
+        # M = 4 pi int_{R_MIN}^{R_CUT} r^-3 r^2 dr, to within the one cell the
+        # cut falls inside.
+        m = _masses(self._seed(self._below_cut())).sum()
+        assert m == pytest.approx(4 * np.pi * np.log(self.R_CUT / R_MIN), rel=0.05)
+
+    def test_a_filter_that_keeps_everything_changes_nothing(self):
+        m_all = _masses(self._seed({'T': lambda T: np.ones_like(T)})).sum()
+        m_none = _masses(self._seed(None)).sum()
+        assert m_all == pytest.approx(m_none, rel=1e-12)
+
+    def test_an_empty_cut_is_an_error_the_user_can_act_on(self):
+        with pytest.raises(ValueError, match="vanishes everywhere"):
+            self._seed({'T': lambda T: np.zeros_like(T)}, n_tracers=100)
+
+    def test_an_unloaded_field_is_refused(self):
+        with pytest.raises(ValueError, match="not among the loaded keys"):
+            self._seed({'ye': lambda v: np.ones_like(v)}, n_tracers=100)
+
+    @pytest.mark.parametrize('handler', [_SplitShellHandler, _ValuesSplitShell])
+    def test_the_filter_applies_on_the_native_grid_too(self, handler):
+        """
+        The native route reads the format's own cells, so the filter reads its
+        field off them too -- and falls back to interpolating at the centres
+        for a format that cannot hand one over.  Both routes must cut the same
+        cells, which is why the two handlers run the same assertions.
+        """
+        np.random.seed(11)
+        fh = handler(lambda r: r, keys=('rho', 'T'), time=0.0)
+        cut = 700.0
+        tr = spherical_by_volume_mc(
+            r_min=R_MIN, r_max=R_MAX, n_tracers=1000, start_t=0.0,
+            weight_grid='native',
+            file_handler=fh, integrator=ExplicitTrapezoid(), vel_keys=('rho',),
+            weight_filters={'T': lambda T: (T <= cut).astype(float)},
+        )
+        lo, hi, w = fh.native_cell_weights(0)
+        keep = np.linalg.norm(_Cells(lo, hi).centres(), axis=0) <= cut
+        assert _masses(tr).sum() == pytest.approx(w[keep].sum(), rel=1e-12)
+        assert _radii(tr).min() >= _SplitShellHandler.SPLIT
+        assert _radii(tr).max() < R_MAX
+
+
+class TestSurfaceWeightFilter:
+    """The same filter on the surface seeder, where it is re-read per snapshot."""
+
+    def test_a_cut_keeps_half_the_sphere_and_half_the_mass(self):
+        # v_z = v_r z/r for a radial outflow, so v_z >= 0 is the northern
+        # hemisphere and exactly half the crossing mass.
+        np.random.seed(5)
+        times = np.linspace(0.0, 10.0, 11)
+        fh = MockSurfaceFileHandler(
+            rho_fn=lambda r: np.full_like(r, TestSurfaceMC.RHO),
+            vr_fn=lambda r: np.full_like(r, TestSurfaceMC.V_R),
+            times=times,
+        )
+        tracers = spherical_surface_mc(
+            r_surf=TestSurfaceMC.R_SURF, t_start=times, n_tracers=2000,
+            file_handler=fh, integrator=ExplicitTrapezoid(),
+            vel_keys=('vx', 'vy', 'vz'),
+            weight_filters={'vz': lambda vz: (vz >= 0).astype(float)},
+        )
+        crossing = (TestSurfaceMC.RHO * TestSurfaceMC.V_R * 4 * np.pi
+                    * TestSurfaceMC.R_SURF**2 * (times[-1] - times[0]))
+        # Whole cells are kept or dropped, so the equator band lands entirely
+        # on one side: half the mass to within one band out of ~30.
+        assert _masses(tracers).sum() == pytest.approx(crossing / 2, rel=0.05)
+        z = np.array([tr.initial_position[2] for tr in tracers.tracers])
+        # Cells are kept whole by their centre, so a tracer can be jittered a
+        # little south of the equator but no further than one cell.
+        assert z.min() > -0.1 * TestSurfaceMC.R_SURF
