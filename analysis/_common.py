@@ -160,28 +160,6 @@ def tracer_masses(trajs: list[Trajectory]) -> np.ndarray:
     return np.array([t.props.get('mass_D', t.props['mass']) for t in trajs])
 
 
-def value_at_reference_temperature(traj: Trajectory, key: str, t_ref_gk: float, Tfac: float) -> float:
-    """
-    Interpolate `traj.data[key]` to the time at which the tracer's temperature
-    first crosses down through `t_ref_gk` (GK), walking forward in time from
-    the trajectory's hottest point.
-
-    Assumes temperature is not perfectly monotonic in general but is, on
-    average, decreasing as the tracer's stored history progresses forward in
-    time (the usual case for expanding ejecta); returns NaN if the tracer
-    never reaches `t_ref_gk` (e.g. it was already cooler than that at the
-    earliest recorded time).
-    """
-    T = traj.data['T'] * Tfac
-    i_hot = np.argmax(T)
-    T_after = T[i_hot:]
-    v_after = traj.data[key][i_hot:]
-    if T_after.min() > t_ref_gk or T_after.max() < t_ref_gk:
-        return np.nan
-    # np.interp needs increasing x; T_after is decreasing (from the hottest point onward).
-    return float(np.interp(t_ref_gk, T_after[::-1], v_after[::-1]))
-
-
 def asymptotic_velocity(specific_energy: np.ndarray) -> np.ndarray:
     """
     Asymptotic (t -> infinity) velocity implied by a conserved specific

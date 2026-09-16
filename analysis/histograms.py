@@ -1,25 +1,40 @@
 #!/usr/bin/env python3
 """
-Mass-weighted histogram panel of per-tracer summary quantities -- the
-standard "what does this ejecta look like" overview: peak temperature,
-composition and expansion timescale at the nucleosynthesis-relevant
-freeze-out temperature, where the ejecta ends up (angle, radius), and how
-fast it's ultimately moving.
+Mass-weighted histograms of per-tracer quantities.
+
+Each --panels entry is one histogram:
+
+    FIELD            value at the tracer's last recorded point
+    FIELD@5GK        value where the tracer *last* crosses T = 5 GK
+    FIELD@500km      value where the tracer *last* crosses r = 500 km
+    FIELD@t10ms      value where the tracer last crosses time = 10 ms
+    Tmax             peak temperature (GK)
+    A,B,C            comma-joined specs overlaid on one axis (Ye@8GK,Ye@5GK,Ye@3GK)
+
+The variable being crossed is inferred from the unit (GK -> T, km -> r,
+ms -> time) and can be given explicitly (Ye@T5GK). FIELD is any key of the
+tracer data plus the derived fields Ye, r, theta, phi, v (coordinate |v|),
+tau (rho/|drho/dt|), vinf_geo (-u_t) and vinf_bern (-h u_t / h_inf, with
+h_inf the global minimum enthalpy of the EOS table). With --eos (a
+PyCompOSE HDF5 table) any EOS quantity evaluated along the tracer's
+(rho, T, Ye) history is a FIELD too: entr, enth, pres, eps, cs2, Y[...],
+... (see src/eos.py), and vinf_bern is computed from it. Without --eos,
+vinf_bern falls back to the recorded hu_t, which the pipeline normalises
+by the Ye-dependent minimum enthalpy instead (a different criterion).
 
 Every histogram is weighted by each tracer's represented mass, so the
-y-axis is always "ejecta mass per bin" (M_sun), not "tracer count per bin"
--- a handful of high-mass tracers matter more than a swarm of low-mass
-ones.
+y-axis is ejecta mass per bin (M_sun), not tracer count.
 
 Example
 -------
-    python analysis/histograms.py \\
-        --tracer-dirs data/tracers_out data/tracers_out_surf \\
-        --t-ref-gk 5.0 --output histograms.png
+    python analysis/histograms.py --tracer-dirs data/tracers_out \\
+        --panels Tmax,T@400km Ye@8GK,Ye@5GK,Ye@3GK tau@5GK theta vinf_geo --output histograms.png
+    python analysis/histograms.py --tracer-dirs data/tracers_out --eos SFHo.h5 \\
+        --panels Ye@5GK entr@5GK tau@5GK vinf_bern
 """
 
 import argparse
-import pathlib as pl
+import re
 
 import numpy as np
 import matplotlib
@@ -30,268 +45,169 @@ from analysis._common import (
     add_tracer_loading_args, load_trajectories, add_spherical_fields,
     tracer_masses, get_units, asymptotic_velocity,
 )
+from src.eos import PyCompOSEEOS
 
-ALL_PANELS = (
-    'Tmax', 'Ye_ref', 'tau_ref', 'theta_final', 'phi_final', 'r_final', 'v_final',
-)
+DEFAULT_PANELS = ['Tmax', 'Ye@5GK', 'tau@5GK', 'theta', 'phi', 'r', 'v']
+SPEC_RE = re.compile(r'^([^@]+?)(?:@([A-Za-z]*?)([\d.eE+-]+)(GK|km|ms))?$')
+UNIT_VAR = {'GK': 'T', 'km': 'r', 'ms': 'time'}
+LOG_FIELDS = {'rho', 'tau', 'r', 'time', 'pres'}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Mass-weighted histogram panel of per-tracer summary quantities.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+        description="Mass-weighted histograms of per-tracer quantities.",
+        formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__,
     )
     add_tracer_loading_args(parser)
-    parser.add_argument('--t-ref-gk', type=float, default=5.0,
-                         help="Reference ('NSE dropout') temperature in GK, at which Ye and the "
-                              "expansion timescale are sampled -- typical literature values are 5-6 GK.")
-    parser.add_argument('--panels', nargs='+', default=list(ALL_PANELS), choices=list(ALL_PANELS),
-                         help="Which panels to include.")
-    parser.add_argument('--r-ref-km', type=float, nargs='+', default=[],
-                         help="Reference radii in km. For each, an extra figure is written with Ye, T, "
-                              "|v| (coordinate + asymptotic), theta and phi sampled at the time each tracer "
-                              "first crosses outward through that radius.")
-    parser.add_argument('--bins', type=int, default=40, help="Number of histogram bins per panel.")
+    parser.add_argument('--panels', nargs='+', default=DEFAULT_PANELS,
+                        help="Panel specs, see below (default: %(default)s).")
+    parser.add_argument('--eos', help="PyCompOSE HDF5 EOS table; enables EOS-derived FIELDs (entr, enth, ...).")
+    parser.add_argument('--bins', type=int, default=40, help="Histogram bins per panel.")
     parser.add_argument('--output', default='histograms.png', help="Output image path.")
     parser.add_argument('--dpi', type=int, default=300, help="Output image DPI.")
     return parser.parse_args()
 
 
-def _reference_values(traj, t_ref_gk: float, Tfac: float) -> tuple:
-    """
-    Ye and expansion timescale (code time units) at the time the tracer's
-    temperature first drops through t_ref_gk, walking forward from its
-    hottest recorded point. Returns (nan, nan) if it never reaches
-    t_ref_gk in that range.
-
-    Entropy is deliberately not carried here.  Not every data source dumps
-    it, and it is recoverable after the fact by evaluating the EOS along
-    each tracer's (rho, T, Ye) history.
-    """
-    T = traj.data['T'] * Tfac
-    i_hot = np.argmax(T)
-    T_after = T[i_hot:]
-    # size guard: np.gradient needs >=2 points; chained comparison is False for NaN T
-    if T_after.size < 2 or not (T_after.min() <= t_ref_gk <= T_after.max()):
-        return np.nan, np.nan
-
-    time_after = traj.data['time'][i_hot:]
-    ye_after = traj.data['r_0'][i_hot:]
-    rho_after = traj.data['rho'][i_hot:]
-    drhodt = np.gradient(rho_after, time_after)
-    tau_after = rho_after / (np.abs(drhodt) + 1e-300)
-
-    # np.interp needs increasing x; T_after is decreasing from the hottest point onward.
-    T_rev = T_after[::-1]
-    ye_ref = np.interp(t_ref_gk, T_rev, ye_after[::-1])
-    tau_ref = np.interp(t_ref_gk, T_rev, tau_after[::-1])
-    return float(ye_ref), float(tau_ref)
+def parse_spec(spec: str) -> tuple:
+    """'Ye@T5GK' -> ('Ye', 'T', 5.0, 'GK'); 'theta' -> ('theta', None, None, None)."""
+    m = SPEC_RE.match(spec)
+    if not m:
+        raise SystemExit(f"Bad panel spec {spec!r}: expected FIELD, FIELD@5GK, FIELD@500km or FIELD@t10ms.")
+    field, var, level, unit = m.groups()
+    if unit:
+        var = var or UNIT_VAR[unit]
+        level = float(level)
+    return field, var, level, unit
 
 
-def _crossing_time(traj, r_ref: float) -> float:
-    """
-    Time (code units) at which the tracer first crosses outward through
-    radius `r_ref` (code units), linearly interpolated between the two
-    samples bracketing the crossing. If the tracer already starts outside
-    `r_ref`, its first recorded time is returned; NaN if it never reaches
-    `r_ref`.
-    """
-    r, t = traj.data['r'], traj.data['time']
-    outside = r >= r_ref
-    if not outside.any():
+def panel_specs(panel: str) -> list:
+    """'Tmax,T@400km' -> [parse_spec('Tmax'), parse_spec('T@400km')]: comma-joined specs share one axis."""
+    return [parse_spec(sp) for sp in panel.split(',')]
+
+
+def field_units(units) -> dict:
+    """Multiply code-unit data by these to get the plotted unit; (factor, unit label)."""
+    return {
+        'T': (units.temperature_gk, 'GK'), 'r': (units.length_km, 'km'),
+        'time': (units.time_ms, 'ms'), 'tau': (units.time_ms, 'ms'),
+        'rho': (units.density_cgs, 'g/cm^3'), 'entr': (1.0, 'k_B/baryon'), 'pres': (1.0, 'MeV/fm^3'),
+    }
+
+
+def derived_fields(traj, fields, eos=None) -> dict:
+    """Per-tracer time series: raw data, the derived aliases and the requested EOS fields, all in code units."""
+    d = dict(traj.data)
+    d['Ye'] = d['r_0']
+    if eos is not None:
+        if 'u_t' in d:   # recorded hu_t is h/h_ref(Ye) u_t; we want the global h_inf
+            d['hu_t'] = eos('enth', d['rho'], d['T'], d['Ye']) * d['u_t'] / eos.h_inf
+        for f in fields:
+            if f not in d and f in eos.keys():
+                d[f] = eos(f, d['rho'], d['T'], d['Ye'])
+    d['v'] = np.sqrt(d['V_u_x']**2 + d['V_u_y']**2 + d['V_u_z']**2)
+    if d['time'].size >= 2:
+        d['tau'] = d['rho'] / (np.abs(np.gradient(d['rho'], d['time'])) + 1e-300)
+    if 'u_t' in d:
+        d['vinf_geo'] = asymptotic_velocity(-d['u_t'])
+    if 'hu_t' in d:
+        d['vinf_bern'] = asymptotic_velocity(-d['hu_t'])
+    return d
+
+
+def last_crossing_time(x: np.ndarray, t: np.ndarray, level: float) -> float:
+    """Time of the last sign change of x - level, linearly interpolated; NaN if none."""
+    s = np.sign(x - level)
+    idx = np.flatnonzero((s[:-1] != s[1:]) & (s[:-1] != 0))
+    if idx.size == 0:
         return np.nan
-    i = int(np.argmax(outside))
-    if i == 0:
-        return float(t[0])
-    f = (r_ref - r[i - 1]) / (r[i] - r[i - 1])
-    return float(t[i - 1] + f * (t[i] - t[i - 1]))
+    i = idx[-1]
+    f = (level - x[i]) / (x[i + 1] - x[i])
+    return float(t[i] + f * (t[i + 1] - t[i]))
 
 
-def _values_at_radius(trajs: list, r_ref_code: float, keys: list) -> dict:
-    """Each key of traj.data interpolated to the tracer's outward crossing of r_ref_code; NaN if it never crosses."""
-    out = {k: np.full(len(trajs), np.nan) for k in keys}
-    for j, tr in enumerate(trajs):
-        t_c = _crossing_time(tr, r_ref_code)
-        if not np.isfinite(t_c):
-            continue
-        for k in keys:
-            out[k][j] = np.interp(t_c, tr.data['time'], tr.data[k])
-    return out
+def sample(d: dict, field: str, var, level_code) -> float:
+    if field == 'Tmax':
+        return float(np.max(d['T']))
+    if field not in d:
+        return np.nan
+    if var is None:
+        return float(d[field][-1])
+    t_c = last_crossing_time(d[var], d['time'], level_code)
+    return np.nan if np.isnan(t_c) else float(np.interp(t_c, d['time'], d[field]))
 
 
-def _velocity_panel(ax, v_coord, v_inf_geo, v_inf_bernoulli, masses, total_mass, bins, coord_label) -> None:
-    """Overlaid mass-weighted histograms of coordinate |v| and the (optional) asymptotic velocities."""
-    for v, label in ((v_coord, coord_label),
-                     (v_inf_geo, "asymptotic (geodesic)"),
-                     (v_inf_bernoulli, "asymptotic (Bernoulli)")):
-        if v is None:
-            continue
-        finite = np.isfinite(v)
-        if finite.any():
-            mass_frac = 100 * masses[finite].sum() / total_mass
-            ax.hist(v[finite], bins=bins, weights=masses[finite],
-                    histtype="step", label=f"{label}, {mass_frac:.1f}% of mass")
-    ax.set_xlabel(r"$|v|$ (c)")
-    ax.legend(fontsize=7)
-
-
-def _radius_figure(trajs, masses, total_mass, r_ref_km, units, bins):
-    """Histogram figure of Ye, T, |v|, theta, phi sampled where tracers cross r_ref_km."""
-    keys = ['r_0', 'T', 'theta', 'phi', 'V_u_x', 'V_u_y', 'V_u_z']
-    keys += [k for k in ('u_t', 'hu_t') if k in trajs[0].data]
-    vals = _values_at_radius(trajs, r_ref_km / units.length_km, keys)
-
-    n_missed = np.sum(~np.isfinite(vals['T']))
-    if n_missed:
-        print(f"r_ref={r_ref_km:g} km: {n_missed} of {len(trajs)} tracers never reach that radius "
-              f"({100 * masses[~np.isfinite(vals['T'])].sum() / total_mass:.2f}% of mass; excluded).")
-
-    v_coord = np.sqrt(vals['V_u_x']**2 + vals['V_u_y']**2 + vals['V_u_z']**2)
-    v_inf_geo = asymptotic_velocity(-vals['u_t']) if 'u_t' in vals else None
-    v_inf_bernoulli = asymptotic_velocity(-vals['hu_t']) if 'hu_t' in vals else None
-
-    panels = [
-        (vals['r_0'], rf"$Y_e$ at {r_ref_km:g} km", False),
-        (vals['T'] * units.temperature_gk, rf"$T$ at {r_ref_km:g} km (GK)", False),
-        (vals['theta'], rf"$\theta$ at {r_ref_km:g} km (deg)", False),
-        (vals['phi'] % 360, rf"$\phi$ at {r_ref_km:g} km (deg)", False),
-    ]
-    n_used = len(panels) + 1  # panels plus the velocity panel
-    n_cols = 3
-    n_rows = -(-n_used // n_cols)
-    fig, ax = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.3 * n_rows), squeeze=False)
-    ax_flat = ax.flatten()
-    for a, (values, label, log) in zip(ax_flat, panels):
-        _mass_weighted_hist(a, values, masses, bins, label, log)
-    _velocity_panel(ax_flat[len(panels)], v_coord, v_inf_geo, v_inf_bernoulli,
-                    masses, total_mass, bins, f"at {r_ref_km:g} km (coordinate)")
-    for a in ax_flat[:n_used]:
-        a.set_ylabel(r"$\Delta m$ ($M_\odot$)")
-    for a in ax_flat[n_used:]:
-        a.set_visible(False)
-    fig.tight_layout()
-    return fig
-
-
-def _mass_weighted_hist(ax, values: np.ndarray, masses: np.ndarray, bins: int, label: str, log: bool = False) -> None:
-    finite = np.isfinite(values)
-    if not finite.any():
+def mass_weighted_hist(ax, curves, masses, bins, xlabel, log) -> None:
+    """Overlay one step histogram per (values, label) in `curves` on shared bin edges."""
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(r"$\Delta m$ ($M_\odot$)")
+    allv = np.concatenate([v[np.isfinite(v) & ((v > 0) if log else True)] for v, _ in curves])
+    if allv.size == 0:
         ax.set_title("(no finite values)")
-        ax.set_xlabel(label)
         return
-    v, m = values[finite], masses[finite]
-    bin_edges = np.geomspace(v[v > 0].min(), v.max(), bins) if log else np.linspace(v.min(), v.max(), bins)
-    ax.hist(v, bins=bin_edges, weights=m, histtype="step")
+    edges = (np.geomspace if log else np.linspace)(allv.min(), allv.max(), bins)
     if log:
         ax.set_xscale("log")
-    ax.set_xlabel(label)
-    if finite.sum() < len(values):
-        ax.set_title(f"{len(values) - finite.sum()} tracer(s) excluded (no finite value)", fontsize=8)
+    excluded = []
+    for values, label in curves:
+        ok = np.isfinite(values) & ((values > 0) if log else True)
+        ax.hist(values[ok], bins=edges, weights=masses[ok], histtype="step", label=label)
+        if not ok.all():
+            excluded.append(f"{label}: {(~ok).sum()} excl. ({100 * masses[~ok].sum() / masses.sum():.1f}% mass)")
+    if len(curves) > 1:
+        ax.legend(fontsize=8)
+    if excluded:
+        ax.set_title("\n".join(excluded), fontsize=7)
 
 
 def main() -> None:
     args = parse_args()
     units = get_units()
+    funits = field_units(units)
+    panels = args.panels
+    specs = [sp for p in panels for sp in panel_specs(p)]
 
     trajs = load_trajectories(args.tracer_dirs, args.glob_pattern, args.n_cpu, tuple(args.status))
     masses = tracer_masses(trajs)
-    total_mass = masses.sum()
-    print(f"{len(trajs)} tracers, total mass {total_mass:.6g} Msun.")
-
+    print(f"{len(trajs)} tracers, total mass {masses.sum():.6g} Msun.")
     for tr in trajs:
         add_spherical_fields(tr)
+    eos = PyCompOSEEOS(args.eos) if args.eos else None
+    if eos is None and 'vinf_bern' in [f for f, *_ in specs]:
+        print("Note: without --eos, vinf_bern uses the recorded hu_t (h / h_ref(Ye) u_t), "
+              "not the global-h_inf Bernoulli criterion.")
+    data = [derived_fields(tr, [f for f, *_ in specs], eos) for tr in trajs]
 
-    panel_values = {}
+    for field, *_ in specs:
+        if field != 'Tmax' and not any(field in d for d in data):
+            raise SystemExit(f"Unknown field {field!r}. Available: {sorted(data[0])}"
+                             + ("" if eos else " (EOS fields need --eos)."))
 
-    if 'Tmax' in args.panels:
-        panel_values['Tmax'] = np.array([np.max(tr.data['T']) for tr in trajs]) * units.temperature_gk
-
-    if {'Ye_ref', 'tau_ref'} & set(args.panels):
-        ref = [_reference_values(tr, args.t_ref_gk, units.temperature_gk) for tr in trajs]
-        ye_ref, tau_ref = (np.array(x) for x in zip(*ref))
-        n_missed = np.isnan(ye_ref).sum()
-        if n_missed:
-            print(f"{n_missed} of {len(trajs)} tracers never reached T_ref={args.t_ref_gk} GK "
-                  f"(excluded from the *_ref panels).")
-        if 'Ye_ref' in args.panels:
-            panel_values['Ye_ref'] = ye_ref
-        if 'tau_ref' in args.panels:
-            panel_values['tau_ref'] = tau_ref * units.time_ms
-
-    if 'theta_final' in args.panels:
-        panel_values['theta_final'] = np.array([tr.data['theta'][-1] for tr in trajs])
-    if 'phi_final' in args.panels:
-        panel_values['phi_final'] = np.array([tr.data['phi'][-1] % 360 for tr in trajs])
-    if 'r_final' in args.panels:
-        panel_values['r_final'] = np.array([tr.data['r'][-1] for tr in trajs]) * units.length_km
-
-    v_final = None
-    v_inf_geo = None
-    v_inf_bernoulli = None
-    if 'v_final' in args.panels:
-        v_final = np.array([
-            np.sqrt(tr.data['V_u_x'][-1]**2 + tr.data['V_u_y'][-1]**2 + tr.data['V_u_z'][-1]**2)
-            for tr in trajs
-        ])
-        if 'u_t' in trajs[0].data:
-            u_t_final = np.array([tr.data['u_t'][-1] for tr in trajs])
-            v_inf_geo = asymptotic_velocity(-u_t_final)
-            n_bound = np.sum(~np.isfinite(v_inf_geo))
-            print(f"Geodesic criterion (-u_t>1): {n_bound} of {len(trajs)} tracers bound "
-                  f"({100 * masses[~np.isfinite(v_inf_geo)].sum() / total_mass:.2f}% of mass) at final time.")
-        else:
-            print("'u_t' not found in tracer data; skipping geodesic-criterion asymptotic velocity.")
-
-        if 'hu_t' in trajs[0].data:
-            hu_t_final = np.array([tr.data['hu_t'][-1] for tr in trajs])
-            v_inf_bernoulli = asymptotic_velocity(-hu_t_final)
-            n_bound_bernoulli = np.sum(~np.isfinite(v_inf_bernoulli))
-            print(f"Bernoulli criterion (-h*u_t>1): {n_bound_bernoulli} of {len(trajs)} tracers bound "
-                  f"({100 * masses[~np.isfinite(v_inf_bernoulli)].sum() / total_mass:.2f}% of mass) at final time.")
-        else:
-            print("'hu_t' not found in tracer data; skipping Bernoulli-criterion asymptotic velocity.")
-
-    panels = [p for p in args.panels if p != 'v_final' or v_final is not None]
-    n_panels = len(panels)
-    n_cols = min(4, n_panels) if n_panels else 1
-    n_rows = -(-n_panels // n_cols) if n_panels else 1
-    fig, ax = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.3 * n_rows), squeeze=False)
-    ax_flat = ax.flatten()
-
-    labels = {
-        'Tmax': (r"$T_{\rm max}$ (GK)", False),
-        'Ye_ref': (rf"$Y_e$ at {args.t_ref_gk:g} GK", False),
-        'tau_ref': (rf"$\tau_{{\rm exp}}$ at {args.t_ref_gk:g} GK (ms)", True),
-        'theta_final': (r"$\theta_{\rm final}$ (deg)", False),
-        'phi_final': (r"$\phi_{\rm final}$ (deg)", False),
-        'r_final': (r"$r_{\rm final}$ (km)", False),
-    }
-
-    for a, panel in zip(ax_flat, panels):
-        if panel == 'v_final':
-            _velocity_panel(a, v_final, v_inf_geo, v_inf_bernoulli,
-                            masses, total_mass, args.bins, "final (coordinate)")
-            continue
-        label, log = labels[panel]
-        _mass_weighted_hist(a, panel_values[panel], masses, args.bins, label, log)
-
-    for a in ax_flat[:n_panels]:
-        a.set_ylabel(r"$\Delta m$ ($M_\odot$)")
-    for a in ax_flat[n_panels:]:
-        a.set_visible(False)
+    n = len(panels)
+    n_cols = min(4, n)
+    n_rows = -(-n // n_cols)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.3 * n_rows), squeeze=False)
+    for ax, panel in zip(axes.flat, panels):
+        curves = []
+        for spec, (field, var, level, unit) in zip(panel.split(','), panel_specs(panel)):
+            level_code = None if unit is None else level / funits[var][0]
+            fac, _ = funits.get('T' if field == 'Tmax' else field, (1.0, ''))
+            values = np.array([sample(d, field, var, level_code) for d in data]) * fac
+            if field == 'phi':
+                values %= 360
+            curves.append((values, spec))
+            n_missing = np.sum(~np.isfinite(values))
+            if n_missing:
+                print(f"{spec}: {n_missing} of {len(trajs)} tracers have no value (excluded).")
+        field = panel_specs(panel)[0][0]
+        ulabel = funits.get('T' if field == 'Tmax' else field, (1.0, ''))[1]
+        xlabel = (', '.join(panel.split(',')) if len(curves) > 1 else curves[0][1]) + (f" ({ulabel})" if ulabel else '')
+        mass_weighted_hist(ax, curves, masses, args.bins, xlabel, field in LOG_FIELDS)
+    for ax in axes.flat[n:]:
+        ax.set_visible(False)
 
     fig.tight_layout()
     fig.savefig(args.output, dpi=args.dpi, bbox_inches="tight")
     print(f"Wrote {args.output}")
-
-    out = pl.Path(args.output)
-    for r_ref_km in args.r_ref_km:
-        r_fig = _radius_figure(trajs, masses, total_mass, r_ref_km, units, args.bins)
-        r_out = out.with_name(f"{out.stem}_r{r_ref_km:g}km{out.suffix}")
-        r_fig.savefig(r_out, dpi=args.dpi, bbox_inches="tight")
-        plt.close(r_fig)
-        print(f"Wrote {r_out}")
 
 
 if __name__ == "__main__":

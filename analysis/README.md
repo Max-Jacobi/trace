@@ -33,14 +33,12 @@ Beyond the core pipeline's dependencies (see the root `README.md`):
 
 ## A note on entropy
 
-None of these scripts read or plot entropy, and it is not in any format's
-default `--keys`.  Not every data source dumps it (AthenaK does not), and
-carrying it through the pipeline buys nothing that cannot be recovered
+Entropy is not in any format's default `--keys`.  Not every data source
+dumps it (AthenaK does not), and carrying it through the pipeline buys nothing that cannot be recovered
 afterwards: evaluating the EOS along each tracer's recorded
 `(rho, T, Ye)` history gives the entropy, and gives it consistently with
-whatever EOS the network run uses.  So if you need `s_ref` for the
-standard `Ye`/`s`/`tau` triplet, compute it at that point rather than
-asking the pipeline to advect it.
+whatever EOS the network run uses.  That is what `histograms.py --eos`
+does (`entr@5GK` for the standard `Ye`/`s`/`tau` triplet), via `src/eos.py`.
 
 ## `plot_trajectories.py`
 
@@ -138,43 +136,37 @@ comparing against the wrong radius.
 
 ## `histograms.py`
 
-Mass-weighted histograms (`Δm` per bin, not tracer count) of the standard
-per-tracer summary quantities used to characterize ejecta composition and
-kinematics:
+Mass-weighted histograms (`Δm` per bin, not tracer count), one panel per
+`--panels` entry:
 
-| Panel | What it shows |
+| Spec | What it shows |
 |---|---|
-| `Tmax` | Peak temperature reached (GK). |
-| `Ye_ref` | Electron fraction at the reference ("NSE dropout") temperature `--t-ref-gk` (default 5 GK) -- the standard proxy for a tracer's final nucleosynthesis composition, since weak rates freeze out around there. |
-| `tau_ref` | Expansion timescale (`rho / |drho/dt|`, ms) at the same reference temperature. `Ye_ref`/`tau_ref`, together with the entropy, are the standard triplet of parameters characterizing r-process nucleosynthesis outcome -- see the note on entropy above. |
-| `theta_final`, `phi_final` | Angular position at the tracer's final recorded time -- where the ejecta ends up. |
-| `r_final` | Radius at the final recorded time. |
-| `v_final` | Final coordinate speed `|v|`, overlaid with the *asymptotic* velocity implied by two different conserved-energy criteria: geodesic (`-u_t`, gravity only) and, if `hu_t` is present, Bernoulli (`-h*u_t`, also lets thermal/internal energy unbind or accelerate a tracer). Each curve's legend entry reports the mass fraction it represents, since a criterion that leaves most tracers bound will produce a much smaller-looking curve even where its shape is otherwise unremarkable. |
+| `FIELD` | value at the tracer's last recorded point (`theta`, `r`, `v`, `vinf_geo`, ...) |
+| `FIELD@5GK` | value where the tracer **last** crosses T = 5 GK (`Ye@5GK`, `tau@5GK`) |
+| `FIELD@500km` | value where the tracer last crosses r = 500 km (`rho@500km`) |
+| `FIELD@t10ms` | value where the tracer last crosses time = 10 ms |
+| `Tmax` | peak temperature (GK) |
+| `A,B,C` | comma-joined specs overlaid on one axis, e.g. `Tmax,T@400km` or `Ye@8GK,Ye@5GK,Ye@3GK` |
 
-Tracers that never reach `--t-ref-gk` are excluded from the `*_ref`
-panels (and reported, both as a tracer count and, for the velocity panel,
-as a mass fraction). `v_inf = sqrt(1 - 1/W_inf**2)` wherever the relevant
-`W_inf` (`-u_t` or `-h*u_t`) exceeds 1 (unbound under that criterion), NaN
-(excluded) otherwise. The two criteria can disagree substantially --
-thermal/magnetic energy can unbind a tracer that's bound on the
-pure-geodesic criterion alone -- and neither necessarily matches
-`v_final`: that's limited by how far the simulation domain/integration
-actually followed the tracer, while `v_inf` is the exact terminal value
-implied by energy conservation regardless of that (generally *smaller*
-than `v_final` for a tracer still deep in the potential well, since it
-hasn't yet paid the deceleration cost of climbing the rest of the way
-out).
+The crossing variable follows from the unit (GK -> `T`, km -> `r`, ms ->
+`time`) or is given explicitly (`Ye@T5GK`). `FIELD` is any key of the
+tracer data plus the derived `Ye`, `r`, `theta`, `phi`, `v` (coordinate
+`|v|`), `tau` (`rho/|drho/dt|`), `vinf_geo` (`-u_t`) and `vinf_bern`
+(`-h u_t / h_inf`, `h_inf` the global minimum enthalpy of the EOS table);
+`v_inf = sqrt(1 - 1/W_inf**2)` where `W_inf > 1`, NaN (excluded) otherwise.
 
-Select a subset with `--panels` (default: all of the above).
+With `--eos path/to/table.h5` (PyCompOSE HDF5) every EOS quantity
+evaluated along the tracer's `(rho, T, Ye)` history is a `FIELD` too:
+`entr` (k_B/baryon), `enth`, `eps`, `pres` (MeV/fm^3), `cs2`, `Y[...]`, and
+any other 3-D dataset of the table. The interpolation lives in
+`src/eos.py` (trilinear in log nb, Ye, log T) so other scripts can reuse
+it. `vinf_bern` is then computed from the EOS enthalpy; without `--eos`
+it falls back to the recorded `hu_t`, which the pipeline normalises by
+the Ye-dependent minimum enthalpy (a different criterion).
 
-**Other panels worth adding, not yet implemented:** a 2-D `Ye`-entropy
-histogram (or `theta` vs. `Ye`, to see equatorial/polar composition
-differences directly) instead of two separate 1-D ones; a mass-weighted
-histogram of injection/seed time (particularly informative for the
-`surface` population, showing *when* mass was ejected, complementing
-`theta_final`/`phi_final`'s *where*); a `|dYe/dt|` vs. position heatmap
-(see the old `t_in_hist.py`, superseded by this directory, for a rough
-version) to locate where composition is still changing fastest.
+Tracers with no value for a panel (never crossed the level, bound under
+the velocity criterion) are excluded and reported as a count and a mass
+fraction.
 
 ## Superseded scripts
 
