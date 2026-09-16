@@ -322,7 +322,7 @@ python run_pipeline.py --data-dir ... --output-dir ... --start-t ... --end-t ...
 | `--r-surf` (`surface-mc`, required) | -- | Radius of the sampled surface. |
 | `--n-tracers` (required) | -- | Number of tracers to draw. |
 | `--phi-min-deg`, `--phi-max-deg`, `--theta-min-deg`, `--theta-max-deg` | `0`/`360`, `0`/`180` | Same meaning as in `volume` mode. |
-| `--every-n-files` (`surface-mc`) | `1` | Sample the flux every Nth snapshot between `--start-t` and `--end-t`. Raising it cuts the cost of the flux integral at the price of a coarser time axis. |
+| `--every-n-files` (`surface-mc`) | `1` | Sample the flux every Nth snapshot between `--start-t` and `--end-t`. Unlike in `surface` mode this does not change how many tracers you get, only how finely the flux is resolved in time. See [below](#--every-n-files-in-surface-mc). |
 | `--weight-grid` | `auto` | Grid the sampling weights are built on: `native` uses the data's own grid with no interpolation at all, `helper` builds an interpolated one sized by `--cells-per-tracer`, `auto` takes native where the format provides it. See [`--weight-grid`](#where-the-sampling-weights-come-from---weight-grid). |
 | `--cells-per-tracer` | `8` | Resolution of the *helper* weight grid (`--n-tracers` times this many cells, split over the axes so cells are roughly isotropic). Raise it to resolve a structured density/flux field better, at the price of more interpolations. Ignored under `--weight-grid native`, where the grid is whatever the data is. |
 | `--weight-filter` | none | Zero the sampling weight where a field fails a cut, e.g. `--weight-filter 'T<1' 'r_0>0.1'`. Nothing is then seeded there, and the tracers carry the mass that passes the cut rather than the region's total. See [`--weight-filter`](#filtering-what-gets-seeded---weight-filter). |
@@ -331,6 +331,36 @@ The weight grid is only the sampling PDF and the mass normalisation: the
 tracer positions themselves are drawn continuously (uniformly in volume,
 resp. in solid angle) inside the drawn cell. Injection times are exact
 snapshot times, since a tracer only activates on one.
+
+#### `--every-n-files` in `surface-mc`
+
+In `surface` mode this flag decides how many tracers you get, one per cell
+per time slot. In `surface-mc` you always get `--n-tracers` of them, so it
+does something else: it sets the time axis of the sampling grid. Four
+consequences, in the order they usually matter.
+
+- **How finely the flux is resolved in time.** Each sampled snapshot carries
+  a trapezoidal `dt` taken from its neighbours, and a cell's weight is
+  `flux * dt`. A stride of 5 makes one snapshot's flux stand for five
+  snapshots' worth of ejecta. If `mdot` varies faster than that, the total is
+  biased, not just noisier.
+- **Which injection times exist.** A tracer activates only on a snapshot
+  time, and it is injected at the exact time of the cell it was drawn from.
+  With a stride of 5 the whole population sits on every 5th snapshot.
+- **The angular resolution of the *helper* grid.** The cell budget
+  `--cells-per-tracer` times `--n-tracers` is split over the sampled times,
+  so sampling more times leaves fewer angular cells per time. Under
+  `--weight-grid native` this does not apply, the angular grid being the
+  data's own.
+- **Cost, but less than it looks.** The flux loop still walks every snapshot
+  in the range, chunk by chunk, and skips the ones not on the time axis. What
+  a larger stride saves is the per-snapshot weight evaluation, not the file
+  reading: on a GR-Athena++ surface run, about 1.4 s per snapshot on the
+  helper grid against 4 ms on the native one.
+
+So under `--weight-grid native` it is close to a pure accuracy knob and `1`
+is a fine default. Under `helper` it is the main lever for making a long time
+range affordable.
 
 ## Step 3: read the output
 
