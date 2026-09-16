@@ -4,7 +4,7 @@ Mass-weighted histograms of per-tracer quantities.
 
 Each --panels entry is one histogram:
 
-    FIELD            value at the tracer's last recorded point
+    FIELD            value at the tracer's last recorded point (also FIELD@final)
     FIELD@5GK        value where the tracer *last* crosses T = 5 GK
     FIELD@500km      value where the tracer *last* crosses r = 500 km
     FIELD@t10ms      value where the tracer last crosses time = 10 ms
@@ -13,7 +13,7 @@ Each --panels entry is one histogram:
 
 The variable being crossed is inferred from the unit (GK -> T, km -> r,
 ms -> time) and can be given explicitly (Ye@T5GK). FIELD is any key of the
-tracer data plus the derived fields Ye, r, theta, phi, v (coordinate |v|),
+tracer data plus the derived fields Ye, r, theta, phi, v (coordinate |v|), v_r,
 tau (rho/|drho/dt|), vinf_geo (-u_t) and vinf_bern (-h u_t / h_inf, with
 h_inf the global minimum enthalpy of the EOS table). With --eos (a
 PyCompOSE HDF5 table) any EOS quantity evaluated along the tracer's
@@ -23,7 +23,9 @@ vinf_bern falls back to the recorded hu_t, which the pipeline normalises
 by the Ye-dependent minimum enthalpy instead (a different criterion).
 
 Every histogram is weighted by each tracer's represented mass, so the
-y-axis is ejecta mass per bin (M_sun), not tracer count.
+y-axis is ejecta mass per bin (M_sun), not tracer count. --select drops
+tracers first (e.g. --select 'r@final>300km' 'Tmax>5GK'); every panel
+samples the full history of the survivors.
 
 Example
 -------
@@ -34,7 +36,6 @@ Example
 """
 
 import argparse
-import re
 
 import numpy as np
 import matplotlib
@@ -42,14 +43,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from analysis._common import (
-    add_tracer_loading_args, load_trajectories, add_spherical_fields,
-    tracer_masses, get_units, asymptotic_velocity,
+    add_tracer_loading_args, add_filter_args, apply_filters, load_trajectories, add_spherical_fields,
+    tracer_masses, get_units, unit_factors, field_units, parse_spec, derived_fields, sample,
 )
 from src.eos import PyCompOSEEOS
 
 DEFAULT_PANELS = ['Tmax', 'Ye@5GK', 'tau@5GK', 'theta', 'phi', 'r', 'v']
-SPEC_RE = re.compile(r'^([^@]+?)(?:@([A-Za-z]*?)([\d.eE+-]+)(GK|km|ms))?$')
-UNIT_VAR = {'GK': 'T', 'km': 'r', 'ms': 'time'}
 LOG_FIELDS = {'rho', 'tau', 'r', 'time', 'pres'}
 
 
@@ -59,6 +58,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__,
     )
     add_tracer_loading_args(parser)
+    add_filter_args(parser, trim=False)
     parser.add_argument('--panels', nargs='+', default=DEFAULT_PANELS,
                         help="Panel specs, see below (default: %(default)s).")
     parser.add_argument('--eos', help="PyCompOSE HDF5 EOS table; enables EOS-derived FIELDs (entr, enth, ...).")
@@ -68,72 +68,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parse_spec(spec: str) -> tuple:
-    """'Ye@T5GK' -> ('Ye', 'T', 5.0, 'GK'); 'theta' -> ('theta', None, None, None)."""
-    m = SPEC_RE.match(spec)
-    if not m:
-        raise SystemExit(f"Bad panel spec {spec!r}: expected FIELD, FIELD@5GK, FIELD@500km or FIELD@t10ms.")
-    field, var, level, unit = m.groups()
-    if unit:
-        var = var or UNIT_VAR[unit]
-        level = float(level)
-    return field, var, level, unit
-
-
 def panel_specs(panel: str) -> list:
     """'Tmax,T@400km' -> [parse_spec('Tmax'), parse_spec('T@400km')]: comma-joined specs share one axis."""
     return [parse_spec(sp) for sp in panel.split(',')]
-
-
-def field_units(units) -> dict:
-    """Multiply code-unit data by these to get the plotted unit; (factor, unit label)."""
-    return {
-        'T': (units.temperature_gk, 'GK'), 'r': (units.length_km, 'km'),
-        'time': (units.time_ms, 'ms'), 'tau': (units.time_ms, 'ms'),
-        'rho': (units.density_cgs, 'g/cm^3'), 'entr': (1.0, 'k_B/baryon'), 'pres': (1.0, 'MeV/fm^3'),
-    }
-
-
-def derived_fields(traj, fields, eos=None) -> dict:
-    """Per-tracer time series: raw data, the derived aliases and the requested EOS fields, all in code units."""
-    d = dict(traj.data)
-    d['Ye'] = d['r_0']
-    if eos is not None:
-        if 'u_t' in d:   # recorded hu_t is h/h_ref(Ye) u_t; we want the global h_inf
-            d['hu_t'] = eos('enth', d['rho'], d['T'], d['Ye']) * d['u_t'] / eos.h_inf
-        for f in fields:
-            if f not in d and f in eos.keys():
-                d[f] = eos(f, d['rho'], d['T'], d['Ye'])
-    d['v'] = np.sqrt(d['V_u_x']**2 + d['V_u_y']**2 + d['V_u_z']**2)
-    if d['time'].size >= 2:
-        d['tau'] = d['rho'] / (np.abs(np.gradient(d['rho'], d['time'])) + 1e-300)
-    if 'u_t' in d:
-        d['vinf_geo'] = asymptotic_velocity(-d['u_t'])
-    if 'hu_t' in d:
-        d['vinf_bern'] = asymptotic_velocity(-d['hu_t'])
-    return d
-
-
-def last_crossing_time(x: np.ndarray, t: np.ndarray, level: float) -> float:
-    """Time of the last sign change of x - level, linearly interpolated; NaN if none."""
-    s = np.sign(x - level)
-    idx = np.flatnonzero((s[:-1] != s[1:]) & (s[:-1] != 0))
-    if idx.size == 0:
-        return np.nan
-    i = idx[-1]
-    f = (level - x[i]) / (x[i + 1] - x[i])
-    return float(t[i] + f * (t[i + 1] - t[i]))
-
-
-def sample(d: dict, field: str, var, level_code) -> float:
-    if field == 'Tmax':
-        return float(np.max(d['T']))
-    if field not in d:
-        return np.nan
-    if var is None:
-        return float(d[field][-1])
-    t_c = last_crossing_time(d[var], d['time'], level_code)
-    return np.nan if np.isnan(t_c) else float(np.interp(t_c, d['time'], d[field]))
 
 
 def mass_weighted_hist(ax, curves, masses, bins, xlabel, log) -> None:
@@ -162,7 +99,7 @@ def mass_weighted_hist(ax, curves, masses, bins, xlabel, log) -> None:
 def main() -> None:
     args = parse_args()
     units = get_units()
-    funits = field_units(units)
+    ufac, funits = unit_factors(units), field_units(units)
     panels = args.panels
     specs = [sp for p in panels for sp in panel_specs(p)]
 
@@ -176,6 +113,7 @@ def main() -> None:
         print("Note: without --eos, vinf_bern uses the recorded hu_t (h / h_ref(Ye) u_t), "
               "not the global-h_inf Bernoulli criterion.")
     data = [derived_fields(tr, [f for f, *_ in specs], eos) for tr in trajs]
+    data, masses = apply_filters(data, masses, args, units)
 
     for field, *_ in specs:
         if field != 'Tmax' and not any(field in d for d in data):
@@ -188,18 +126,18 @@ def main() -> None:
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.3 * n_rows), squeeze=False)
     for ax, panel in zip(axes.flat, panels):
         curves = []
-        for spec, (field, var, level, unit) in zip(panel.split(','), panel_specs(panel)):
-            level_code = None if unit is None else level / funits[var][0]
-            fac, _ = funits.get('T' if field == 'Tmax' else field, (1.0, ''))
-            values = np.array([sample(d, field, var, level_code) for d in data]) * fac
+        for spec, parsed in zip(panel.split(','), panel_specs(panel)):
+            field = parsed[0]
+            fac, _ = funits.get(field, (1.0, ''))
+            values = np.array([sample(d, parsed, ufac) for d in data]) * fac
             if field == 'phi':
                 values %= 360
             curves.append((values, spec))
             n_missing = np.sum(~np.isfinite(values))
             if n_missing:
-                print(f"{spec}: {n_missing} of {len(trajs)} tracers have no value (excluded).")
+                print(f"{spec}: {n_missing} of {len(data)} tracers have no value (excluded).")
         field = panel_specs(panel)[0][0]
-        ulabel = funits.get('T' if field == 'Tmax' else field, (1.0, ''))[1]
+        ulabel = funits.get(field, (1.0, ''))[1]
         xlabel = (', '.join(panel.split(',')) if len(curves) > 1 else curves[0][1]) + (f" ({ulabel})" if ulabel else '')
         mass_weighted_hist(ax, curves, masses, args.bins, xlabel, field in LOG_FIELDS)
     for ax in axes.flat[n:]:
