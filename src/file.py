@@ -11,6 +11,7 @@ import sys
 import atexit
 from abc import ABC, abstractmethod
 from typing import TextIO, Any
+from collections.abc import Callable
 from multiprocessing.shared_memory import SharedMemory
 from functools import reduce
 
@@ -216,6 +217,62 @@ class FileHandler(ABC):
         if r_sample is None:
             return self.mass_density.density(values, pos) * measure
         return self.mass_density.radial_flux(values, pos) * measure
+
+    def read_shm_cells(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        take: Callable[[np.ndarray], np.ndarray],
+        ) -> np.ndarray:
+        """
+        Field values straight out of shared memory, on this format's own cells.
+
+        Shared by every format implementing :meth:`native_cell_weights`, whose
+        only format-specific part is `take`: it slices one snapshot's array
+        down to the cells, in the same order the bounds come back in.
+
+        Returns an array of shape ``(len(keys), n_cells)``.
+        """
+        rows = []
+        for key in keys:
+            shm = SharedMemory(name=self.shared_memory[slot][key])
+            try:
+                buf = np.ndarray(shape=self.extra_data['shape'],
+                                 dtype=np.float64, buffer=shm.buf)
+                # np.array copies: ravel alone can hand back a view into the
+                # buffer, which the close below would leave dangling.
+                rows.append(np.array(take(buf)).ravel())
+            finally:
+                shm.close()
+        return np.stack(rows)
+
+    def native_cell_values(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        surface_radius: float | None = None,
+        ) -> np.ndarray:
+        """
+        The value of `keys` on the cells :meth:`native_cell_weights` returns.
+
+        Optional, and only worth implementing where that one is: it is the same
+        cells in the same order, so column ``i`` belongs to the cell whose
+        bounds are column ``i`` there. Seeding filters read this to cut on a
+        field the mass density knows nothing about, which on a fine mesh is
+        much cheaper than interpolating that field back onto the cell centres
+        it was written on.
+
+        Returns an array of shape ``(len(keys), n_cells)``.
+
+        Raises
+        ------
+        NotImplementedError
+            If this format cannot enumerate its cells; the caller then falls
+            back to interpolating at the cell centres.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot read fields off its own cells."
+        )
 
     def native_cell_weights(
         self,

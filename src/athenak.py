@@ -523,13 +523,15 @@ class AthenaKFileHandler(FileHandler):
             return 0.0, "", [], 0
         return info['time'], file_path, avail_keys, extra_data['mem_size']
 
-    def native_cell_weights(
+    def _native_layout(
         self,
-        slot: int,
         surface_radius: float | None = None,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ) -> tuple[np.ndarray, np.ndarray, Any, float | None]:
         """
-        See :meth:`~src.file.FileHandler.native_cell_weights`.
+        Where this format's cells are: their bounds, the slice of one snapshot's
+        array that holds them, and the radius a surface value was sampled at.
+        Split out of :meth:`native_cell_weights` so that reading a field off
+        the same cells -- see :meth:`native_cell_values` -- shares it.
 
         AthenaK writes a single global spherical grid, so the cells are the
         dumped samples. Three conventions have to be honoured, all detected in
@@ -550,7 +552,6 @@ class AthenaKFileHandler(FileHandler):
         r = np.asarray(self.extra_data['r'], dtype=float)
         nodes = np.asarray(self.extra_data['polar_nodes'], dtype=float)[ng:-ng]
         ph = np.asarray(self.extra_data['ph'], dtype=float)[ng:-ng]
-        shape = self.extra_data['shape']
 
         d_polar = nodes[1] - nodes[0]
         polar_edges = np.concatenate((nodes - d_polar / 2, [nodes[-1] + d_polar / 2]))
@@ -587,19 +588,34 @@ class AthenaKFileHandler(FileHandler):
             lo, hi = tensor_cell_bounds(cth_edges, ph_edges)
             r_sample = float(r[j])
 
+        return lo, hi, i_r, r_sample
+
+    def _read_cells(self, slot: int, keys: tuple[str, ...], i_r) -> np.ndarray:
+        ng = self.n_ghosts
+        return self.read_shm_cells(slot, keys,
+                                   lambda buf: buf[i_r, ng:-ng, ng:-ng])
+
+    def native_cell_weights(
+        self,
+        slot: int,
+        surface_radius: float | None = None,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """See :meth:`~src.file.FileHandler.native_cell_weights`."""
+        lo, hi, i_r, r_sample = self._native_layout(surface_radius)
         keys = (self.mass_density.density_keys if surface_radius is None
                 else self.mass_density.flux_keys)
-        values = np.empty((len(keys), lo.shape[1]))
-        for i_k, key in enumerate(keys):
-            shm = SharedMemory(name=self.shared_memory[slot][key])
-            try:
-                buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
-                values[i_k] = buf[i_r, ng:-ng, ng:-ng].ravel()
-            finally:
-                shm.close()
+        values = self._read_cells(slot, keys, i_r)
+        return lo, hi, self.cell_weights_from_values(lo, hi, values, r_sample)
 
-        weights = self.cell_weights_from_values(lo, hi, values, r_sample)
-        return lo, hi, weights
+    def native_cell_values(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        surface_radius: float | None = None,
+        ) -> np.ndarray:
+        """See :meth:`~src.file.FileHandler.native_cell_values`."""
+        _, _, i_r, _ = self._native_layout(surface_radius)
+        return self._read_cells(slot, keys, i_r)
 
     @staticmethod
     def load_step_to_memory(

@@ -591,6 +591,43 @@ class TestNativeCellWeights:
         finally:
             fh.free_shared_memory()
 
+    def test_native_values_are_the_nodes_themselves(self, tmp_path):
+        """
+        native_cell_values exists so a seeding filter can read a field off the
+        cells instead of interpolating it back onto the centres it was written
+        on. It has to be the same cells in the same order as the weights, which
+        is what pinning it against the interpolated nodes checks.
+        """
+        fh = self._loaded(tmp_path, with_velocity=True)
+        try:
+            keys = ('rho', *self.VEL)
+            vals = fh.native_cell_values(0, keys)
+            ref, _ = self._at_nodes(fh, keys)
+            assert vals.shape == ref.shape
+            np.testing.assert_allclose(vals, ref, rtol=1e-10)
+        finally:
+            fh.free_shared_memory()
+
+    def test_native_surface_values_take_the_containing_layer(self, tmp_path):
+        """The same, on the sphere: one radial layer, the one r_surf falls in."""
+        r_surf = 25.0
+        fh = self._loaded(tmp_path, with_velocity=True)
+        try:
+            _, _, w = fh.native_cell_weights(0, surface_radius=r_surf)
+            ng = fh.extra_data['file_ng']
+            x1f = fh.extra_data['x1f']
+            i_r = {}
+            for b in range(fh.extra_data['shape'][0]):
+                r_e = x1f[b, ng:ng + self.INTERIOR[0] + 1]
+                if r_e[0] <= r_surf < r_e[-1]:
+                    i_r[b] = int(np.searchsorted(r_e, r_surf, 'right')) - 1
+            vals = fh.native_cell_values(0, ('rho',), surface_radius=r_surf)
+            ref, _ = self._at_nodes(fh, ('rho',), i_r=i_r)
+            assert vals.shape == (1, w.size)
+            np.testing.assert_allclose(vals, ref, rtol=1e-10)
+        finally:
+            fh.free_shared_memory()
+
     def test_weight_is_the_cell_mass(self, tmp_path):
         """
         The point of going native is skipping the interpolator, so the weight

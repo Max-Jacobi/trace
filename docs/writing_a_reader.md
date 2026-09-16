@@ -308,3 +308,41 @@ that every consumer can write `hi - lo` without an `abs`.
 silently, and the base-class implementation raises `NotImplementedError` with
 a message naming your class -- so the fallback is detected by the method not
 being overridden, not by a flag you have to set.
+
+## Optional: `native_cell_values`
+
+Implement this too if you implemented `native_cell_weights`. It is the same
+cells in the same order, but it hands back the raw value of the keys asked
+for rather than a mass:
+
+```python
+def native_cell_values(self, slot, keys, surface_radius=None):
+    _, _, i_r, _ = self._native_layout(surface_radius)
+    return self._read_cells(slot, keys, i_r)
+```
+
+The seeders use it for `--weight-filter`, which cuts the sampling weight on a
+field the mass density knows nothing about (see the
+[main README](../README.md#filtering-what-gets-seeded---weight-filter)).
+Without it they interpolate that field back onto the centres it was written
+on, which on a fine mesh is by far the most expensive thing the seeding does:
+on a GR-Athena++ surface run with 32768 cells it took 6.5 s per snapshot
+against 4 ms for the weights themselves, and reading the cells instead brought
+it to 1 ms.
+
+Return `(len(keys), n_cells)`, with column `i` belonging to the cell whose
+bounds are column `i` of `native_cell_weights`. The shipped formats get that
+for free by splitting the cell layout into a `_native_layout` helper both
+methods call, and by reading through `self.read_shm_cells(slot, keys, take)`,
+where `take` is the one format-specific part, the slice of a snapshot's array
+that holds the cells in their order:
+
+```python
+def _read_cells(self, slot, keys, i_r):
+    ng = self.n_ghosts
+    return self.read_shm_cells(slot, keys, lambda buf: buf[i_r, ng:-ng, ng:-ng])
+```
+
+Omitting it is fine. The base class raises `NotImplementedError` and the
+seeders fall back to the interpolator, which is what a format without a native
+grid uses anyway.

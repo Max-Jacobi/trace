@@ -312,13 +312,15 @@ class SphericalAthdfFileHandler(FileHandler):
             key_specs=_build_key_specs(self.keys),
         )
 
-    def native_cell_weights(
+    def _native_layout(
         self,
-        slot: int,
         surface_radius: float | None = None,
-        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray | None]:
         """
-        See :meth:`~src.file.FileHandler.native_cell_weights`.
+        Where this format's cells are: their bounds, which meshblocks and which
+        radial layer of them hold the cells, and the radius a surface value was
+        sampled at. Split out of :meth:`native_cell_weights` so that reading a
+        field off the same cells -- see :meth:`native_cell_values` -- shares it.
 
         Every meshblock is a small separable grid of its own, so the cells are
         each block's cells, concatenated in block order to match the value
@@ -375,25 +377,39 @@ class SphericalAthdfFileHandler(FileHandler):
         lo = np.concatenate([b[0] for b in bounds], axis=1)
         hi = np.concatenate([b[1] for b in bounds], axis=1)
 
+        return lo, hi, blocks, i_r, r_sample
+
+    def _read_cells(self, slot, keys, blocks, i_r) -> np.ndarray:
+        ng = self.extra_data['file_ng']
+        i1, i2, i3 = self.extra_data['interior']
+
+        def take(buf):
+            interior = buf[:, ng:ng + i1, ng:ng + i2, ng:ng + i3]
+            return interior[blocks] if i_r is None else interior[blocks, i_r]
+
+        return self.read_shm_cells(slot, keys, take)
+
+    def native_cell_weights(
+        self,
+        slot: int,
+        surface_radius: float | None = None,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """See :meth:`~src.file.FileHandler.native_cell_weights`."""
+        lo, hi, blocks, i_r, r_sample = self._native_layout(surface_radius)
         keys = (self.mass_density.density_keys if surface_radius is None
                 else self.mass_density.flux_keys)
-        shms = []
-        try:
-            rows = []
-            for key in keys:
-                shm = SharedMemory(name=self.shared_memory[slot][key])
-                shms.append(shm)
-                buf = np.ndarray(shape=shape, dtype=np.float64, buffer=shm.buf)
-                interior = buf[:, ng:ng + i1, ng:ng + i2, ng:ng + i3]
-                rows.append((interior[blocks] if i_r is None
-                             else interior[blocks, i_r]).reshape(-1))
-            values = np.stack(rows)
-        finally:
-            for shm in shms:
-                shm.close()
+        values = self._read_cells(slot, keys, blocks, i_r)
+        return lo, hi, self.cell_weights_from_values(lo, hi, values, r_sample)
 
-        weights = self.cell_weights_from_values(lo, hi, values, r_sample)
-        return lo, hi, weights
+    def native_cell_values(
+        self,
+        slot: int,
+        keys: tuple[str, ...],
+        surface_radius: float | None = None,
+        ) -> np.ndarray:
+        """See :meth:`~src.file.FileHandler.native_cell_values`."""
+        _, _, blocks, i_r, _ = self._native_layout(surface_radius)
+        return self._read_cells(slot, keys, blocks, i_r)
 
     @staticmethod
     def parse_file(
