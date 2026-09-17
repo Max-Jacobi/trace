@@ -108,7 +108,13 @@ def parse_args() -> argparse.Namespace:
                                  "skip the ground-truth comparison entirely.")
     raw_group.add_argument('--batchtools', action='store_true',
                             help="Assume --raw-sim-dir has a batchtools subdirectory structure (output-0000...).")
-    raw_group.add_argument('--isurf', type=int, default=1, help="Index of the raw surface diagnostic to use.")
+    raw_group.add_argument('--athenak', action='store_true',
+                            help="--raw-sim-dir holds AthenaK spherical surface ('sph') vtk dumps "
+                                 "(*.r=<radius>.<group>.<iter>.vtk) instead of GR-Athena++ HDF5 surface "
+                                 "dumps. --isurf is ignored in this mode -- there is no surface-index "
+                                 "concept, only extraction radius families.")
+    raw_group.add_argument('--isurf', type=int, default=1,
+                            help="Index of the raw surface diagnostic to use. Ignored with --athenak.")
     raw_group.add_argument('--irad', type=int, default=None,
                             help="Radius index of the raw surface diagnostic. Default: auto-inferred from "
                                  "--r-check by reading a sample raw file's radius grid and picking the "
@@ -280,45 +286,74 @@ def main() -> None:
     ax[1].plot(t_ms, mtot_srf, label='surface contribution only')
 
     if args.raw_sim_dir is not None:
-        from surface import Surfaces
         from surface import surface_func as sf
 
         if args.batchtools:
             paths = [f"{args.raw_sim_dir}/{d}" for d in os.listdir(args.raw_sim_dir)
                      if os.path.isdir(f"{args.raw_sim_dir}/{d}") and d.startswith("output-")]
+            if args.athenak:
+                # AthenaK batchtools restarts keep the sph dumps in a
+                # per-output 'sph' subdirectory, not output-XXXX/ itself.
+                paths = [f"{p}/sph" if os.path.isdir(f"{p}/sph") else p for p in paths]
         else:
             paths = [args.raw_sim_dir]
 
-        irad = args.irad
-        if irad is None:
-            irad, actual_r = infer_irad(paths, args.isurf, args.r_check)
-            print(f"Auto-selected --irad={irad} (grid radius {actual_r:.3f}) closest to --r-check={args.r_check:.3f}.")
+        if args.athenak:
+            from surface import SphSurfaces
 
-        s = Surfaces(paths, args.isurf, irad, n_cpu=args.raw_n_cpu, verbose=args.verbose)
+            if args.irad is None:
+                s = SphSurfaces(paths, radius=args.r_check, n_cpu=args.raw_n_cpu, verbose=args.verbose)
+                print(f"Auto-selected AthenaK extraction radius {s.r:.3f} closest to --r-check={args.r_check:.3f}.")
+            else:
+                s = SphSurfaces(paths, i_radius=args.irad, n_cpu=args.raw_n_cpu, verbose=args.verbose)
+        else:
+            from surface import Surfaces
+
+            irad = args.irad
+            if irad is None:
+                irad, actual_r = infer_irad(paths, args.isurf, args.r_check)
+                print(f"Auto-selected --irad={irad} (grid radius {actual_r:.3f}) closest to --r-check={args.r_check:.3f}.")
+
+            s = Surfaces(paths, args.isurf, irad, n_cpu=args.raw_n_cpu, verbose=args.verbose)
+
         if not np.isclose(s.r, args.r_check, rtol=1e-3):
             print(f"WARNING: raw diagnostic surface radius ({s.r:.3f}) does not match "
                   f"--r-check ({args.r_check:.3f}); the overlay below is not measuring the same boundary.")
 
-        # Surface dumps that carry the derived `tracer.*` group hand us rho and
-        # V^i ready-made. The plain GR-Athena++ surface output (the one written
-        # without that group) carries the evolved variables instead, and there
-        # the same flux is D*V^i, which is what sf.mass_flux builds -- and for a
-        # densitized flux like D the flat normal of integrate_flux_classical is
-        # exact rather than approximate.
-        tracer_flux = ("tracer.hydro.aux.V_u_x", "tracer.hydro.aux.V_u_y",
-                       "tracer.hydro.aux.V_u_z")
-        tracer_weight = "tracer.hydro.prim.rho"
-        if all(k in s.fields for k in (*tracer_flux, tracer_weight)):
-            mdot_sf = sf.integrate_flux_classical(flux=tracer_flux, weight=tracer_weight)
-        else:
-            missing = [k for k in sf.mass_flux.keys if k not in s.fields]
+        if args.athenak:
+            # AthenaK sph dumps only ever carry the evolved metric plus
+            # primitives (rho, util^i) -- there is no 'tracer.*' group and no
+            # evolved conserved D, so the flux has to be rebuilt from
+            # primitives via sf.mass_flux_prim (== sf.mdot_prim's integrand).
+            missing = [k for k in sf.mass_flux_prim.keys if k not in s.fields]
             if missing:
                 raise KeyError(
-                    f"surface{args.isurf} dumps carry neither the 'tracer.*' group nor "
-                    f"the variables sf.mass_flux needs (missing {missing}). Point "
-                    f"--isurf at a surface that dumps one of the two."
+                    f"AthenaK sph dumps under {paths} are missing {missing} needed for "
+                    f"sf.mass_flux_prim. Check --raw-sim-dir points at the extraction "
+                    f"radius family with the adm/z4c_*/hydro output groups."
                 )
-            mdot_sf = sf.integrate_flux_classical(flux=sf.mass_flux)
+            mdot_sf = sf.integrate_flux_classical(flux=sf.mass_flux_prim)
+        else:
+            # Surface dumps that carry the derived `tracer.*` group hand us rho and
+            # V^i ready-made. The plain GR-Athena++ surface output (the one written
+            # without that group) carries the evolved variables instead, and there
+            # the same flux is D*V^i, which is what sf.mass_flux builds -- and for a
+            # densitized flux like D the flat normal of integrate_flux_classical is
+            # exact rather than approximate.
+            tracer_flux = ("tracer.hydro.aux.V_u_x", "tracer.hydro.aux.V_u_y",
+                           "tracer.hydro.aux.V_u_z")
+            tracer_weight = "tracer.hydro.prim.rho"
+            if all(k in s.fields for k in (*tracer_flux, tracer_weight)):
+                mdot_sf = sf.integrate_flux_classical(flux=tracer_flux, weight=tracer_weight)
+            else:
+                missing = [k for k in sf.mass_flux.keys if k not in s.fields]
+                if missing:
+                    raise KeyError(
+                        f"surface{args.isurf} dumps carry neither the 'tracer.*' group nor "
+                        f"the variables sf.mass_flux needs (missing {missing}). Point "
+                        f"--isurf at a surface that dumps one of the two."
+                    )
+                mdot_sf = sf.integrate_flux_classical(flux=sf.mass_flux)
         print(f"raw ground truth from {mdot_sf.name}")
         raw_data = s.process_h5_parallel((mdot_sf,), ordered=True)
         raw_mdot = np.array([d[0] for d in raw_data])
