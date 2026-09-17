@@ -4,11 +4,13 @@ Mass-weighted histograms of per-tracer quantities.
 
 Each --panels entry is one histogram:
 
-    FIELD            value at the tracer's last recorded point (also FIELD@final)
+    FIELD            value at the latest physical time (also FIELD@final)
+    FIELD@initial    value at the earliest physical time
     FIELD@5GK        value where the tracer *last* crosses T = 5 GK
     FIELD@500km      value where the tracer *last* crosses r = 500 km
     FIELD@t10ms      value where the tracer last crosses time = 10 ms
-    Tmax             peak temperature (GK)
+    FIELD@min        smallest value over the whole history (FIELD@max likewise)
+    Tmax             peak temperature (GK), an alias for T@max
     A,B,C            comma-joined specs overlaid on one axis (Ye@8GK,Ye@5GK,Ye@3GK)
 
 The variable being crossed is inferred from the unit (GK -> T, km -> r,
@@ -24,7 +26,7 @@ by the Ye-dependent minimum enthalpy instead (a different criterion).
 
 Every histogram is weighted by each tracer's represented mass, so the
 y-axis is ejecta mass per bin (M_sun), not tracer count. --select drops
-tracers first (e.g. --select 'r@final>300km' 'Tmax>5GK'); every panel
+tracers first (e.g. --select 'r@min<300km' 'Tmax>5GK'); every panel
 samples the full history of the survivors.
 
 Example
@@ -116,7 +118,7 @@ def main() -> None:
     data, masses = apply_filters(data, masses, args, units)
 
     for field, *_ in specs:
-        if field != 'Tmax' and not any(field in d for d in data):
+        if not any(field in d for d in data):
             raise SystemExit(f"Unknown field {field!r}. Available: {sorted(data[0])}"
                              + ("" if eos else " (EOS fields need --eos)."))
 

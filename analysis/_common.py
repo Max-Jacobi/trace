@@ -194,16 +194,24 @@ def asymptotic_velocity(specific_energy: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # Panel / filter spec grammar, shared by histograms.py and plot_trajectories.py
 #
-#   FIELD          value at the tracer's last recorded point (also FIELD@final)
+#   FIELD          value at the latest physical time (also FIELD@final)
+#   FIELD@initial  value at the earliest physical time
+#   FIELD@min      smallest value over the whole history (FIELD@max likewise)
 #   FIELD@5GK      value where the tracer *last* crosses T = 5 GK
 #   FIELD@500km    value where the tracer last crosses r = 500 km
 #   FIELD@t10ms    value where the tracer last crosses time = 10 ms
-#   Tmax           peak temperature
+#   Tmax           peak temperature, an alias for T@max
 #
 # The crossed variable follows from the unit (GK -> T, km -> r, ms -> time)
 # unless given explicitly (Ye@T5GK).
 # ---------------------------------------------------------------------------
 AT_RE = re.compile(r'^([A-Za-z]*?)([\d.eE+-]+)(GK|km|ms)$')
+# Tracer files are written sorted by increasing physical time (Tracer.output_to_ascii
+# sorts on self.times), so 'initial'/'final' are the earliest/latest physical time
+# whichever direction the integration ran: for a backward run the integration's last
+# step is the *initial* point here.
+AGGS = {'min': np.min, 'max': np.max,
+        'initial': lambda a: a[0], 'final': lambda a: a[-1]}
 UNIT_VAR = {'GK': 'T', 'km': 'r', 'ms': 'time'}
 PRED_RE = re.compile(r'^(.+?)(<=|>=|==|!=|<|>)([\d.eE+-]+)([A-Za-z/0-9^]*)$')
 _OPS = {'<': np.less, '<=': np.less_equal, '>': np.greater, '>=': np.greater_equal,
@@ -211,13 +219,21 @@ _OPS = {'<': np.less, '<=': np.less_equal, '>': np.greater, '>=': np.greater_equ
 
 
 def parse_spec(spec: str) -> tuple:
-    """'Ye@T5GK' -> ('Ye', 'T', 5.0, 'GK'); 'theta' / 'r@final' -> ('theta', None, None, None)."""
+    """
+    'Ye@T5GK' -> ('Ye', 'T', 5.0, 'GK'), a crossing; 'r@min' -> ('r', 'min', None, None),
+    an aggregate; 'theta' -> ('theta', None, None, None), the latest physical time.
+    """
+    if spec == 'Tmax':          # documented shorthand, predates the @max aggregate
+        return 'T', 'max', None, None
     field, _, at = spec.partition('@')
-    if not at or at == 'final':
+    if not at:
         return field, None, None, None
+    if at in AGGS:
+        return field, at, None, None
     m = AT_RE.match(at)
     if not m:
-        raise SystemExit(f"Bad spec {spec!r}: expected FIELD, FIELD@final, FIELD@5GK, FIELD@500km or FIELD@t10ms.")
+        raise SystemExit(f"Bad spec {spec!r}: expected FIELD, FIELD@initial, FIELD@final, "
+                         f"FIELD@min, FIELD@max, FIELD@5GK, FIELD@500km or FIELD@t10ms.")
     var, level, unit = m.groups()
     return field, var or UNIT_VAR[unit], float(level), unit
 
@@ -230,7 +246,7 @@ def unit_factors(units: Units) -> dict:
 def field_units(units: Units) -> dict:
     """Plotted unit per field: (factor to multiply code-unit data by, unit label)."""
     return {
-        'T': (units.temperature_gk, 'GK'), 'Tmax': (units.temperature_gk, 'GK'),
+        'T': (units.temperature_gk, 'GK'),
         'r': (units.length_km, 'km'), 'time': (units.time_ms, 'ms'), 'tau': (units.time_ms, 'ms'),
         'rho': (units.density_cgs, 'g/cm3'), 'entr': (1.0, 'k_B/baryon'), 'pres': (1.0, 'MeV/fm^3'),
     }
@@ -284,12 +300,12 @@ def last_crossing_time(x: np.ndarray, t: np.ndarray, level: float) -> float:
 def sample(d: dict, spec: tuple, ufac: dict) -> float:
     """Evaluate a parsed spec on one tracer's derived fields; code units, NaN if unavailable."""
     field, var, level, unit = spec
-    if field == 'Tmax':
-        return float(np.max(d['T']))
     if field not in d:
         return np.nan
     if var is None:
         return float(d[field][-1])
+    if level is None:                       # @initial / @final / @min / @max
+        return float(AGGS[var](d[field]))
     t_c = last_crossing_time(d[var], d['time'], level / ufac[unit])
     return np.nan if np.isnan(t_c) else float(np.interp(t_c, d['time'], d[field]))
 
@@ -297,7 +313,7 @@ def sample(d: dict, spec: tuple, ufac: dict) -> float:
 def select_tracers(data: list, predicates: list, units: Units) -> np.ndarray:
     """
     Boolean mask of tracers satisfying every predicate like 'Tmax>5GK',
-    'Ye@5GK<0.4' or 'r@final>300km'. The threshold is in the named unit,
+    'Ye@5GK<0.4', 'r@min<300km' or 'r@final>300km'. The threshold is in the named unit,
     or in the field's plotted unit when none is given. NaN never passes.
     """
     ufac, funits = unit_factors(units), field_units(units)
@@ -308,7 +324,7 @@ def select_tracers(data: list, predicates: list, units: Units) -> np.ndarray:
             raise SystemExit(f"Bad --select {pred!r}: expected SPEC<op>VALUE[unit], e.g. Tmax>5GK.")
         spec, op, value, unit = m.groups()
         spec = parse_spec(spec)
-        if spec[0] != 'Tmax' and not any(spec[0] in d for d in data):
+        if not any(spec[0] in d for d in data):
             raise SystemExit(f"--select {pred!r}: unknown field {spec[0]!r}. Available: {sorted(data[0])}")
         if unit and unit not in ufac:
             raise SystemExit(f"--select {pred!r}: unknown unit {unit!r}, use one of {list(ufac)}.")
@@ -370,7 +386,7 @@ def add_filter_args(parser: argparse.ArgumentParser, trim: bool = True) -> argpa
     g = parser.add_argument_group("tracer filtering")
     g.add_argument('--select', nargs='*', default=[],
                     help="Keep only tracers satisfying every predicate SPEC<op>VALUE[unit], e.g. "
-                         "'Tmax>5GK' 'Ye@5GK<0.4' 'r@final>300km' 'mass>0'. A missing value never passes.")
+                         "'Tmax>5GK' 'Ye@5GK<0.4' 'r@min<300km' 'mass>0'. A missing value never passes.")
     if trim:
         g.add_argument('--after', nargs='?', default=None, const=None, metavar='VAR@LEVEL',
                         help="Keep only the part of each history after its last crossing of VAR@LEVEL, e.g. "

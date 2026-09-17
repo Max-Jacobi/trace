@@ -8,8 +8,9 @@ tracer's average value of --color-by. Useful as a first sanity look at a
 new run: are trajectories smooth, do fields evolve as expected, are there
 obvious outliers?
 
-By default only tracers ending beyond 300 km are shown (--select
-'r@final>300km', dropping atmosphere/fallback material) and each history
+By default only tracers that come inside 300 km at some point are shown
+(--select 'r@min<300km', dropping material that never was near the
+remnant, e.g. atmosphere seeded far out) and each history
 starts at its last drop below 10 GK (--after T@10GK; tracers that never
 get that hot are kept whole, tracers still above 10 GK at the end are
 dropped). Pass --select or --after with no value to switch either off.
@@ -59,7 +60,7 @@ def parse_args() -> argparse.Namespace:
     )
     add_tracer_loading_args(parser)
     g = add_filter_args(parser)
-    g.set_defaults(select=['r@final>300km'], after='T@10GK')
+    g.set_defaults(select=['r@min<300km'], after='T@10GK')
     parser.add_argument('--n-sample', type=int, default=200,
                          help="Number of tracers to randomly sample and plot.")
     parser.add_argument('--seed', type=int, default=None,

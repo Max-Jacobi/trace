@@ -47,12 +47,12 @@ written in the same spec grammar as the histogram panels:
 
 | Option | Effect |
 |---|---|
-| `--select 'Tmax>5GK' 'Ye@5GK<0.4' 'r@final>300km' 'mass>0'` | keep only tracers satisfying every predicate `SPEC<op>VALUE[unit]`; the threshold is in the named unit (`GK`, `km`, `ms`, `g/cm3`) or, without one, in the field's plotted unit. A tracer whose value is NaN (never reached the level) is dropped. |
+| `--select 'Tmax>5GK' 'Ye@5GK<0.4' 'r@min<300km' 'mass>0'` | keep only tracers satisfying every predicate `SPEC<op>VALUE[unit]`; the threshold is in the named unit (`GK`, `km`, `ms`, `g/cm3`) or, without one, in the field's plotted unit. A tracer whose value is NaN (never reached the level) is dropped. |
 | `--after T@10GK` | keep only the part of each history after its **last** crossing of the level, i.e. after the last drop below 10 GK (for `r`/`time` levels: after the last move outward/later). A tracer that never reaches the level is kept whole; one that ends on the wrong side (still above 10 GK) is dropped. |
 | `--before r@500km` | same for the part before the last crossing, judged at the start point |
 
 Both trims start/end exactly at the interpolated crossing point.
-`plot_trajectories.py` defaults to `--select 'r@final>300km' --after T@10GK`
+`plot_trajectories.py` defaults to `--select 'r@min<300km' --after T@10GK`
 (ejecta only, from the last drop below 10 GK); a bare `--select` or
 `--after` switches the default off. `histograms.py` only takes `--select`:
 its panels always sample the full history.
@@ -158,12 +158,19 @@ Mass-weighted histograms (`Δm` per bin, not tracer count), one panel per
 
 | Spec | What it shows |
 |---|---|
-| `FIELD` | value at the tracer's last recorded point (`theta`, `r`, `v`, `vinf_geo`, ...) |
+| `FIELD` | value at the latest physical time, also written `FIELD@final` (`theta`, `r`, `v`, `vinf_geo`, ...) |
+| `FIELD@initial` | value at the earliest physical time |
 | `FIELD@5GK` | value where the tracer **last** crosses T = 5 GK (`Ye@5GK`, `tau@5GK`) |
 | `FIELD@500km` | value where the tracer last crosses r = 500 km (`rho@500km`) |
 | `FIELD@t10ms` | value where the tracer last crosses time = 10 ms |
-| `Tmax` | peak temperature (GK) |
+| `FIELD@min` | smallest value over the whole history (`FIELD@max` likewise) |
+| `Tmax` | peak temperature (GK), an alias for `T@max` |
 | `A,B,C` | comma-joined specs overlaid on one axis, e.g. `Tmax,T@400km` or `Ye@8GK,Ye@5GK,Ye@3GK` |
+
+Tracer files are written sorted by increasing physical time, so `initial`
+and `final` mean the earliest and latest physical time whichever direction
+the integration ran. For a backward run the integration's last step is the
+`initial` point here.
 
 The crossing variable follows from the unit (GK -> `T`, km -> `r`, ms ->
 `time`) or is given explicitly (`Ye@T5GK`). `FIELD` is any key of the
